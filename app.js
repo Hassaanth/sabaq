@@ -225,8 +225,10 @@
       // ignore the mic from now, while the recording loads
       const before = this.gateUntil;
       this.gateUntil = Math.max(before, Date.now() + delayMs + 1500);
+      // "Listen" from now until the qari has finished, so "Your turn" only shows once the reciter can speak
+      this.speaking = p; render(false);
       const buf = await this.buffer(p);
-      if (!buf || !a) { this.gateUntil = before; toast('No qari recording for this word in this demo.', 3000); return false; }
+      if (!buf || !a) { this.gateUntil = before; this.speaking = -1; render(false); toast('No qari recording for this word here.', 3000); return false; }
       if (this.source) { try { this.source.stop(); } catch (e) { /* ended */ } }
       const src = a.createBufferSource(), g = a.createGain();
       g.gain.value = 1;
@@ -234,12 +236,12 @@
       const startAt = a.currentTime + delayMs / 1000;
       src.start(startAt);
       this.source = src;
-      this.gateUntil = Date.now() + delayMs + buf.duration * 1000 + 450;
-      setTimeout(() => { this.speaking = p; render(false); }, delayMs);
+      const listenMs = delayMs + buf.duration * 1000 + 450;
+      this.gateUntil = Date.now() + listenMs;
+      // "Your turn" appears exactly when the mic is listening again (timer-based, so it also works if the
+      // browser keeps audio muted and never reports the end of playback)
       const done = () => { if (this.source === src) { this.source = null; this.speaking = -1; render(false); } };
-      src.onended = done;
-      // if the browser keeps audio muted (no tap yet, or blocked), "ended" may never come: end the listen state anyway
-      setTimeout(done, delayMs + buf.duration * 1000 + 300);
+      setTimeout(done, listenMs + 20);
       return true;
     },
     preload(surahNo) {
@@ -325,7 +327,7 @@
   // 1) Claude dictation (when hosted on claude.ai)  2) the browser's own speech recognition  3) typing
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const Input = {
-    dict: null, rec: null, kind: 'none', state: 'idle', want: false, fed: 0, sim: null,
+    dict: null, rec: null, kind: 'none', state: 'idle', want: false, okOnce: false, lastError: null, restartTimer: 0, sim: null,
     active() { return this.state !== 'idle'; },
   };
   let wakeLock = null;
@@ -371,8 +373,12 @@
     } catch (e) { /* no dictation in this view */ }
   })();
 
+  // (window.__fakeIOS is set only by the dev-only tests/fake-sr.js)
+  const IS_IOS = !!window.__fakeIOS || /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
   function startListening() {
     if (Input.sim) stopSim();
+    if (Kbd.on) { closeKbd(); return; }
     if (Input.kind === 'dictation') {
       setMic('starting');
       Input.dict.start({ language: 'ar' }).catch(err => {
@@ -385,86 +391,168 @@
       return;
     }
     if (Input.kind === 'webspeech') { startWebSpeech(); return; }
+    if (IS_IOS) { openKbdHelp('This browser has no speech recognition.'); return; }
     toast('This browser has no speech recognition. Use Chrome or Safari, or type instead.', 5000);
     openType();
   }
   function stopListening() {
     if (Input.sim) { stopSim(); return; }
+    if (Kbd.on) { closeKbd(); return; }
     if (Input.kind === 'dictation' && Input.dict) { Input.dict.stop().catch(() => {}); return; }
-    if (Input.rec) { Input.want = false; try { Input.rec.stop(); } catch (e) { /* already stopped */ } }
+    Input.want = false;
+    clearTimeout(Input.restartTimer);
+    if (Input.rec) { try { Input.rec.stop(); } catch (e) { /* already stopped */ } }
+    else { setMic('idle'); settle(); }
   }
 
-  function settlePending() {
-    clearTimeout(Input.settleTimer);
-    if (Input.pending && Input.pending.length) {
-      const p = Input.pending;
-      Input.fed += p.length; Input.pending = [];
-      commit(p.join(' '));
-    }
-    // silence: judge whatever is still being weighed (e.g. the last word of an ayah)
-    if (!P && T.qi < T.q.length) { T.flush(); handleEvents(); render(); }
-  }
-  // Browser speech recognition. Chrome on Android repeats earlier results inside later ones,
-  // and every browser ends sessions on silence, so results are rebuilt and the session restarted.
-  function startWebSpeech() {
+  // ---- turning a growing transcript into settled words (shared by browser speech and keyboard dictation)
+  // Everything except the last two words is treated as settled (iPhone may never mark results final);
+  // the last two stay live (previewed). A short silence settles them too and judges them.
+  const Feed = {
+    fed: 0, pending: [], timer: 0,
+    reset() { this.fed = 0; this.pending = []; clearTimeout(this.timer); },
+    ingest(words, allFinal) {
+      const settled = allFinal ? words.length : Math.max(0, words.length - 2);
+      if (words.length < this.fed) this.fed = words.length; // the transcript was revised shorter
+      if (settled > this.fed) { commit(words.slice(this.fed, settled).join(' ')); this.fed = settled; }
+      this.pending = words.slice(this.fed);
+      preview(this.pending.join(' '));
+      clearTimeout(this.timer);
+      this.timer = setTimeout(() => this.settle(), 900);
+    },
+    settle() {
+      clearTimeout(this.timer);
+      if (this.pending.length) {
+        const p = this.pending;
+        this.fed += p.length; this.pending = [];
+        commit(p.join(' '));
+      }
+      // silence: judge whatever is still being weighed (e.g. the last word of an ayah)
+      if (!P && T.qi < T.q.length) { T.flush(); handleEvents(); render(); }
+    },
+  };
+
+  // ---- the browser's own speech recognition (Chrome, Edge, Safari)
+  // iPhone Safari: continuous mode is unreliable, so each phrase is its own short session, restarted
+  // after it ends. iOS may refuse a restart that is not started by a tap; then the reciter taps the
+  // mic to go on (or uses keyboard dictation, which keeps listening by itself).
+  function makeRec() {
     const rec = new SR();
     rec.lang = 'ar-SA';
-    rec.continuous = true;
+    rec.continuous = !IS_IOS;
     rec.interimResults = true;
     rec.maxAlternatives = 1;
-    Input.rec = rec; Input.want = true; Input.fed = 0; Input.pending = [];
-    rec.onstart = () => setMic('listening');
-    // The whole session's transcript is rebuilt on every event (Android repeats earlier results inside
-    // later ones). Everything except the last two words is treated as settled, because iPhone Safari
-    // may not mark results final until it stops; the last two stay live (previewed) until settled.
+    rec.onstart = () => { Input.okOnce = true; setMic('listening'); };
     rec.onresult = e => {
-      Input.heardAt = Date.now();
+      Input.okOnce = true;
       const parts = [];
       for (let i = 0; i < e.results.length; i++) {
         const t = e.results[i][0].transcript.trim();
         if (!t) continue;
+        // Chrome on Android repeats earlier results inside later ones
         if (parts.length && t.startsWith(parts[parts.length - 1])) parts[parts.length - 1] = t;
         else parts.push(t);
       }
-      const words = E.tokenize(parts.join(' '));
       const last = e.results[e.results.length - 1];
-      const settled = last && last.isFinal ? words.length : Math.max(0, words.length - 2);
-      if (words.length < Input.fed) Input.fed = words.length; // the transcript was revised shorter
-      if (settled > Input.fed) { commit(words.slice(Input.fed, settled).join(' ')); Input.fed = settled; }
-      Input.pending = words.slice(Input.fed);
-      preview(Input.pending.join(' '));
-      // a short silence settles the last words too (and judges them), so a slip at the end of an ayah is caught
-      clearTimeout(Input.settleTimer);
-      Input.settleTimer = setTimeout(settlePending, 900);
+      Feed.ingest(E.tokenize(parts.join(' ')), !!(last && last.isFinal));
     };
     rec.onerror = e => {
-      if (e.error === 'service-not-allowed') {
+      const code = e.error;
+      Input.lastError = code;
+      if (code === 'no-speech' || code === 'aborted') return; // silence: onend restarts
+      if (code === 'service-not-allowed' || code === 'not-allowed') {
         Input.want = false;
-        toast(/iPhone|iPad/.test(navigator.userAgent)
-          ? 'Speech recognition is off. On iPhone: Settings > General > Keyboard > turn on Enable Dictation, then try again.'
-          : 'Speech recognition is blocked here. Open the Sabaq website directly, or type instead.', 7000);
-      } else if (e.error === 'not-allowed') {
+        if (Input.okOnce && IS_IOS) {
+          // it worked, then iOS refused to carry on without a tap
+          toast('Your iPhone paused listening. Tap the mic to go on, or use keyboard dictation to keep listening.', 6000);
+        } else if (IS_IOS) {
+          openKbdHelp(code === 'not-allowed'
+            ? 'Safari was not allowed to use the microphone (not-allowed).'
+            : 'Safari\'s speech recognition is turned off or blocked on this iPhone (service-not-allowed).');
+        } else {
+          toast(code === 'not-allowed' ? 'Microphone access was blocked. Allow it in the browser, or type instead.'
+            : 'Speech recognition is blocked here (service-not-allowed). Open the site in Chrome, or type instead.', 7000);
+        }
+      } else if (code === 'language-not-supported') {
         Input.want = false;
-        toast(/iPhone|iPad/.test(navigator.userAgent)
-          ? 'Microphone blocked. On iPhone: Settings > Safari > Microphone > Allow, then reload.'
-          : 'Microphone access was blocked. Allow it in the browser, or type instead.', 7000);
-      } else if (e.error === 'language-not-supported') {
-        Input.want = false;
-        toast('This browser cannot recognise Arabic speech. Try Chrome, or type instead.', 5000);
-      } else if (e.error === 'network') toast('Speech recognition needs an internet connection.', 4000);
+        if (IS_IOS) openKbdHelp('Safari cannot recognise Arabic on this iPhone (language-not-supported).');
+        else toast('This browser cannot recognise Arabic speech. Try Chrome, or type instead.', 5000);
+      } else if (code === 'audio-capture') {
+        toast('No microphone input. Another app may be using the microphone.', 5000);
+      } else if (code === 'network') {
+        toast('Speech recognition needs an internet connection.', 4000);
+      } else {
+        toast('Speech recognition error: ' + code + '. Tap the mic to try again.', 5000);
+      }
     };
     rec.onend = () => {
-      // the browser ends a session after silence: carry on with a new one (the words so far are settled)
-      settlePending(); // the last words of the session were never settled: they are now
+      Feed.settle(); // the last words of the session were never settled: they are now
+      Feed.reset();  // a new session starts a new transcript
       if (Input.want) {
-        Input.fed = 0;
-        try { rec.start(); return; } catch (err) { toast('Listening paused. Tap the mic to keep going.', 4000); }
+        clearTimeout(Input.restartTimer);
+        Input.restartTimer = setTimeout(restartWebSpeech, IS_IOS ? 150 : 0);
+        return;
       }
       Input.rec = null; setMic('idle'); settle();
     };
-    setMic('starting');
-    try { rec.start(); } catch (err) { setMic('idle'); toast('Could not start the microphone.', 4000); }
+    return rec;
   }
+  function restartWebSpeech() {
+    if (!Input.want) { Input.rec = null; setMic('idle'); settle(); return; }
+    try { Input.rec.start(); return; } catch (e) { /* this one can't restart: use a fresh one */ }
+    try { Input.rec = makeRec(); Input.rec.start(); }
+    catch (e) {
+      Input.want = false; Input.rec = null; setMic('idle'); settle();
+      toast('Listening paused. Tap the mic to go on.', 4000);
+    }
+  }
+  // Called from the mic tap. Starting recognition is the first thing the tap does (iPhone is strict about it).
+  function startWebSpeech() {
+    Input.want = true; Input.okOnce = false; Input.lastError = null;
+    Feed.reset();
+    Input.rec = makeRec();
+    setMic('starting');
+    try { Input.rec.start(); }
+    catch (err) {
+      Input.want = false; Input.rec = null; setMic('idle');
+      if (IS_IOS) openKbdHelp('Safari could not start speech recognition.');
+      else toast('Could not start the microphone.', 4000);
+    }
+  }
+
+  // ---- iPhone keyboard dictation: the iPhone keyboard's own microphone types the recitation into a box,
+  // and Sabaq reads it as it is typed. Works without Safari's speech recognition, and keeps listening.
+  const Kbd = { on: false };
+  const kbdField = $('kbdField');
+  function openKbd() {
+    closeAll();
+    if (Input.state !== 'idle') stopListening();
+    Kbd.on = true;
+    kbdField.value = '';
+    Feed.reset();
+    $('kbdBar').hidden = false;
+    kbdField.focus(); // must happen inside the tap, or the keyboard won't open
+    setMic('listening');
+    toast('Tap the microphone on the keyboard, then recite', 4000);
+  }
+  function closeKbd() {
+    if (!Kbd.on) return;
+    Kbd.on = false;
+    Feed.settle(); Feed.reset();
+    kbdField.blur();
+    $('kbdBar').hidden = true;
+    setMic('idle'); settle();
+  }
+  kbdField.addEventListener('input', () => { if (Kbd.on) Feed.ingest(E.tokenize(kbdField.value), false); });
+  $('kbdDone').addEventListener('click', closeKbd);
+  function openKbdHelp(reason) {
+    closeAll();
+    $('kbdReason').textContent = reason || '';
+    $('kbdReason').hidden = !reason;
+    $('kbdDlg').showModal();
+  }
+  $('kbdGo').addEventListener('click', openKbd);
+  $('kbdOpen').addEventListener('click', openKbd);
 
   // ---------------------------------------------------------------- simulated recitation
   // phrases: arrays of words; each word is "heard" in turn, a phrase settles at its end, like real speech.
@@ -686,7 +774,7 @@
   });
 
   // ---------------------------------------------------------------- controls
-  $('micBtn').addEventListener('click', () => { audio(); if (Input.state === 'idle') startListening(); else stopListening(); });
+  $('micBtn').addEventListener('click', () => { if (Input.state === 'idle') startListening(); else stopListening(); audio(); });
   $('finishBtn').addEventListener('click', () => {
     if (Input.state !== 'idle') stopListening();
     settle();
@@ -734,6 +822,17 @@
     e.preventDefault();
     if (Input.state === 'idle') startListening(); else stopListening();
   });
+
+  // iPhone: when the keyboard opens (keyboard dictation), fit the app into the space above it
+  if (window.visualViewport) {
+    const vv = window.visualViewport;
+    const fit = () => {
+      const covered = window.innerHeight - vv.height > 120;
+      if (covered) { document.documentElement.style.setProperty('--app-h', vv.height + 'px'); window.scrollTo(0, 0); }
+      else document.documentElement.style.removeProperty('--app-h');
+    };
+    vv.addEventListener('resize', fit);
+  }
 
   // ---------------------------------------------------------------- start
   const startSurah = Math.min(114, Math.max(1, +store.get('surah', 67) || 67));

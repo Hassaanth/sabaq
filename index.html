@@ -69,6 +69,7 @@ button { cursor: pointer; }
 :focus-visible { outline: 2px solid var(--lapis); outline-offset: 2px; border-radius: 6px; }
 
 .app { height: 100%; display: flex; flex-direction: column; }
+:root[style*="--app-h"] .app { height: calc(var(--app-h) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); }
 .gutter { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
 
 /* ---------- header ---------- */
@@ -190,6 +191,12 @@ dialog::backdrop { background: rgb(10 16 18 / .45); }
 textarea { width: 100%; min-height: 7.5rem; border: 1px solid var(--rule); background: var(--paper); border-radius: 10px; padding: 10px 12px; direction: rtl; font-family: var(--f-quran); font-size: 1.35rem; line-height: 1.9; resize: vertical; }
 
 .demo-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.steps { margin: 0; padding-inline-start: 1.3em; display: grid; gap: 8px; font-size: var(--t-sm); line-height: 1.5; max-width: 65ch; }
+.kbd-bar { border-top: 1px solid var(--rule); background: var(--sheet); }
+.kbd-in { max-width: 48rem; margin: 0 auto; padding-block: 8px; display: grid; gap: 6px; }
+.kbd-label { font-size: var(--t-xs); color: var(--muted); }
+.kbd-row { display: flex; gap: 8px; align-items: stretch; }
+.kbd-row textarea { min-height: 3.2rem; flex: 1; min-width: 0; font-size: 1.2rem; line-height: 1.6; }
 .score { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .score div { border: 1px solid var(--rule); border-radius: 12px; padding: 10px 12px; display: grid; gap: 2px; }
 .score b { font-size: var(--t-xl); font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.2; }
@@ -247,6 +254,16 @@ textarea { width: 100%; min-height: 7.5rem; border: 1px solid var(--rule); backg
     </div>
   </main>
 
+  <div class="kbd-bar gutter" id="kbdBar" hidden>
+    <div class="kbd-in">
+      <label class="kbd-label" for="kbdField">Keyboard dictation: tap 🎤 on the keyboard and recite. Use the Arabic keyboard (🌐).</label>
+      <div class="kbd-row">
+        <textarea id="kbdField" lang="ar" dir="rtl" rows="2" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="تبارك الذي بيده الملك"></textarea>
+        <button class="btn" id="kbdDone" type="button">Done</button>
+      </div>
+    </div>
+  </div>
+
   <footer class="dock gutter">
     <div class="toast" id="toast" data-show="0" role="status"></div>
     <div class="dock-in">
@@ -289,11 +306,30 @@ textarea { width: 100%; min-height: 7.5rem; border: 1px solid var(--rule); backg
       <p class="hint">The demo is a student reciting Surah Al-Mulk from memory. They skip a word, restart an ayah, slip on a sound and say a wrong word. With teacher mode on, listen for the stop signal, then the tick when they fix it.</p>
       <div class="demo-row"><button class="btn primary" id="demoBtn" type="button">Play the demo</button><button class="btn" id="burujBtn" type="button">Al-Buruj: الجنوب for الجنود</button></div>
       <p class="hint">In teacher mode a qari recites the correct word after each stop. Then say the word, or the whole ayah, to carry on. Use headphones if you can, so the mic does not pick up the qari.</p>
-      <p class="hint">On iPhone, open <b>hassaanth.github.io/sabaq</b> in Safari for the microphone.</p>
+      <p class="hint">On iPhone, open <b>hassaanth.github.io/sabaq</b> in Safari for the microphone. If Safari's speech recognition doesn't work, use the iPhone keyboard's own dictation:</p>
+      <button class="btn" id="kbdOpen" type="button">Recite with keyboard dictation</button>
       <p class="hint">Or type or paste Arabic words. They go through the same engine as speech, a few words at a time.</p>
       <textarea id="simText" lang="ar" placeholder="تبارك الذي بيده الملك"></textarea>
     </div>
     <div class="dlg-foot"><button class="btn" type="button" data-close>Cancel</button><button class="btn primary" id="simGo" type="button">Recite these words</button></div>
+  </div>
+</dialog>
+
+<dialog id="kbdDlg" aria-labelledby="kbdDlgTitle">
+  <div class="dlg">
+    <div class="dlg-head"><h2 id="kbdDlgTitle">Recite with iPhone keyboard dictation</h2><button class="icon-btn" type="button" data-close aria-label="Close">✕</button></div>
+    <div class="dlg-body">
+      <p class="hint" id="kbdReason" hidden></p>
+      <p class="hint">Your iPhone keyboard has its own microphone. Sabaq can follow you through it, and it keeps listening while you recite.</p>
+      <ol class="steps">
+        <li>Once: <b>Settings › General › Keyboard › Keyboards › Add New Keyboard › Arabic</b>, and turn on <b>Enable Dictation</b> on the same Keyboard screen.</li>
+        <li>Tap <b>Start keyboard dictation</b> below. A box opens with the keyboard.</li>
+        <li>Switch to the Arabic keyboard with 🌐, tap the <b>🎤 microphone key</b>, and recite.</li>
+        <li>Tap <b>Done</b> when you finish.</li>
+      </ol>
+      <p class="hint">Safari's built-in speech recognition needs the same <b>Enable Dictation</b> setting, and only works in Safari itself (not from a Home Screen icon or inside another app).</p>
+    </div>
+    <div class="dlg-foot"><button class="btn" type="button" data-close>Cancel</button><button class="btn primary" id="kbdGo" type="button">Start keyboard dictation</button></div>
   </div>
 </dialog>
 

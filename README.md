@@ -7,6 +7,15 @@ and only flags a mistake when the evidence says it is one.
 
 Open **https://hassaanth.github.io/sabaq/** in **Safari** (iPhone) or **Chrome** (Android), tap the mic, allow
 the microphone, and recite. On iPhone, Dictation must be on: Settings > General > Keyboard > Enable Dictation.
+
+**iPhone: keyboard dictation (most reliable).** Safari's speech recognition is unreliable on iPhone (it can be
+refused with `service-not-allowed`, and it stops after each phrase). Sabaq can instead follow the iPhone
+keyboard's own dictation: keyboard button › **Recite with keyboard dictation** (it also opens automatically if
+Safari refuses). Once: Settings › General › Keyboard › Keyboards › Add New Keyboard › Arabic, and Enable
+Dictation. Then tap the box, switch to the Arabic keyboard (🌐), tap the 🎤 key and recite. Tap Done to finish.
+
+With Safari's recognizer on iPhone, each phrase is its own short session and Sabaq restarts it; if iOS refuses a
+restart without a tap, it says so ("Tap the mic to go on").
 Headphones help: the qari's correction then doesn't reach the mic, and iPhones can play sound quietly
 through the earpiece while the mic is on. The screen is kept awake while listening.
 

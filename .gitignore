@@ -1,0 +1,4 @@
+# Bundled Quran.com audio is only for the claude.ai demo page; the website streams it from Quran.com.
+audio/
+node_modules/
+.claude/

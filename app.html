@@ -1,0 +1,300 @@
+<title>Sabaq Recitation Tracker</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Readex+Pro:wght@300;400;500;600&family=Reem+Kufi:wght@600&display=swap">
+<style>
+/* Layout: one-screen app. Header / scrolling mushaf page (the subject) / control dock.
+   The page reads like a mushaf: cool paper, ink, gilt ayah markers, lapis for the one control that matters. */
+:root {
+  --paper: #f4f6f3;
+  --sheet: #fbfcfa;
+  --ink: #16211e;
+  --muted: #5b6863;
+  --pending: #8d9893;
+  --rule: #d9e0dc;
+  --veil: #e3e8e5;
+  --lapis: #1f4f61;
+  --lapis-ink: #f4f8f9;
+  --gilt: #a7802f;
+  --ok: #2f7a4d;
+  --check: #b0731a;
+  --check-bg: #f6ead2;
+  --miss: #b23a3c;
+  --miss-bg: #f7dfdc;
+  --unclear: #7c8a90;
+  --cursor-bg: #e6eef0;
+  --shadow: 0 1px 2px rgb(22 33 30 / .06), 0 8px 24px rgb(22 33 30 / .08);
+
+  --f-quran: "Amiri Quran", "Amiri", "Scheherazade New", "Noto Naskh Arabic", "Traditional Arabic", serif;
+  --f-ui: "Readex Pro", "Segoe UI", system-ui, -apple-system, "Noto Sans Arabic", sans-serif;
+  --f-mark: "Reem Kufi", "Readex Pro", system-ui, sans-serif;
+
+  --t-xs: .75rem; --t-sm: .875rem; --t-md: 1rem; --t-lg: 1.25rem; --t-xl: 1.75rem;
+  --quran-size: clamp(1.55rem, 5.2vw, 2.05rem);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0e1416; --sheet: #121a1c; --ink: #e4ebe8; --muted: #95a39e; --pending: #64716c;
+    --rule: #233033; --veil: #1d282a; --lapis: #6fb0c4; --lapis-ink: #0b1517; --gilt: #d2b066;
+    --ok: #69bd8b; --check: #e2a24a; --check-bg: #3a2c14; --miss: #f07b7b; --miss-bg: #3d1d1e;
+    --unclear: #84939a; --cursor-bg: #1b2a30; --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 24px rgb(0 0 0 / .35);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0e1416; --sheet: #121a1c; --ink: #e4ebe8; --muted: #95a39e; --pending: #64716c;
+  --rule: #233033; --veil: #1d282a; --lapis: #6fb0c4; --lapis-ink: #0b1517; --gilt: #d2b066;
+  --ok: #69bd8b; --check: #e2a24a; --check-bg: #3a2c14; --miss: #f07b7b; --miss-bg: #3d1d1e;
+  --unclear: #84939a; --cursor-bg: #1b2a30; --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 24px rgb(0 0 0 / .35);
+  color-scheme: dark;
+}
+
+html { height: 100%; box-sizing: border-box; }
+*, *::before, *::after { box-sizing: border-box; }
+body { height: 100%; margin: 0; background: var(--paper); color: var(--ink); font-family: var(--f-ui); font-size: var(--t-md); }
+button, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--lapis); outline-offset: 2px; border-radius: 6px; }
+
+.app { height: 100%; display: flex; flex-direction: column; }
+.gutter { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+
+/* ---------- header ---------- */
+.top { border-bottom: 1px solid var(--rule); background: var(--paper); }
+.top-in { max-width: 48rem; margin: 0 auto; padding-block: 10px; display: flex; align-items: center; gap: 10px; }
+.brand { display: flex; align-items: baseline; gap: 8px; margin-inline-end: auto; min-width: 0; }
+.brand b { font-family: var(--f-mark); font-weight: 600; font-size: 1.5rem; color: var(--lapis); line-height: 1; }
+.brand span { font-size: var(--t-sm); color: var(--muted); letter-spacing: .02em; white-space: nowrap; }
+.surah-btn { display: flex; align-items: center; gap: 8px; border: 1px solid var(--rule); background: var(--sheet); border-radius: 999px; padding: 6px 12px 6px 14px; min-width: 0; }
+.surah-btn .en { font-size: var(--t-sm); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 9.5rem; }
+.surah-btn svg { flex: none; color: var(--muted); }
+.icon-btn { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 999px; border: 1px solid transparent; background: transparent; color: var(--muted); flex: none; }
+.icon-btn:hover { background: var(--veil); color: var(--ink); }
+.icon-btn[aria-pressed="true"] { background: var(--lapis); color: var(--lapis-ink); }
+@media (max-width: 420px) { .brand span { display: none; } }
+
+.status { max-width: 48rem; margin: 0 auto; padding-block: 8px; font-size: var(--t-sm); color: var(--muted); display: flex; align-items: center; gap: 8px; min-height: 2.25rem; }
+.status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--pending); flex: none; }
+.status[data-live="on"] .dot { background: var(--ok); animation: pulse 1.4s ease-in-out infinite; }
+.status[data-live="finding"] .dot { background: var(--check); animation: pulse 1s ease-in-out infinite; }
+.status[data-live="stopped"] { color: var(--miss); }
+.status[data-live="stopped"] .dot { background: var(--miss); animation: pulse .6s ease-in-out infinite; }
+.status .stopword { font-family: var(--f-quran); font-size: 1.25rem; line-height: 1; }
+.status button.link { border: 0; background: none; padding: 0; color: var(--lapis); text-decoration: underline; text-underline-offset: 3px; font-size: inherit; }
+@keyframes pulse { 50% { opacity: .35; } }
+
+/* ---------- mushaf page ---------- */
+main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 30%; }
+.page { max-width: 48rem; margin: 0 auto; padding-block: 20px 48px; }
+.sheet { background: var(--sheet); border: 1px solid var(--rule); border-radius: 14px; padding: 22px clamp(14px, 4vw, 34px) 30px; box-shadow: var(--shadow); }
+.surah-head { text-align: center; display: grid; gap: 4px; padding-bottom: 14px; margin-bottom: 10px; border-bottom: 1px solid var(--rule); }
+.surah-head .ar { font-family: var(--f-quran); font-size: 2.1rem; line-height: 1.6; color: var(--ink); }
+.surah-head .meta { font-size: var(--t-xs); color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+.bism { font-family: var(--f-quran); text-align: center; font-size: calc(var(--quran-size) * .95); color: var(--muted); margin: 8px 0 4px; }
+.quran { direction: rtl; font-family: var(--f-quran); font-size: var(--quran-size); line-height: 2.35; text-align: justify; text-align-last: center; word-spacing: .06em; }
+.quran.big { font-size: calc(var(--quran-size) * 1.12); }
+
+.w { color: var(--pending); border-radius: .28em; padding: 0 .07em; transition: color .3s, background-color .3s; cursor: pointer; text-decoration-skip-ink: none; }
+.w:hover { background: var(--veil); }
+.w.s1, .w.s6 { color: var(--ink); }
+.w.s6 { opacity: .72; }
+.w.s2 { color: var(--ink); background: var(--check-bg); text-decoration: underline dotted var(--check); text-decoration-thickness: .07em; text-underline-offset: .42em; }
+.w.s3 { color: var(--ink); text-decoration: underline dotted var(--unclear); text-decoration-thickness: .06em; text-underline-offset: .42em; }
+.w.s4 { color: var(--miss); background: var(--miss-bg); }
+.w.s5 { color: var(--miss); text-decoration: underline wavy var(--miss); text-decoration-thickness: .05em; text-underline-offset: .42em; }
+.w.cur { background: var(--cursor-bg); box-shadow: inset 0 -.11em 0 var(--gilt); color: var(--ink); }
+/* teacher mode: the word you are stopped at, and words you fixed */
+.w.stopw, .w.stopw.cur { color: var(--miss); background: var(--miss-bg); box-shadow: 0 0 0 .09em var(--miss); animation: stopPulse 1.1s ease-in-out 3; }
+@keyframes stopPulse { 50% { box-shadow: 0 0 0 .22em var(--miss-bg), 0 0 0 .09em var(--miss); } }
+.w.fx { color: var(--ok); }
+.w.fx::after { content: "✓"; font-family: var(--f-ui); font-size: .42em; font-weight: 600; vertical-align: super; color: var(--ok); margin-inline-start: .12em; }
+.aya { color: var(--gilt); font-family: var(--f-quran); white-space: nowrap; padding: 0 .08em; }
+
+/* memorization mode: what you have not recited yet stays veiled */
+.memorize .w.s0 { color: transparent; background: linear-gradient(var(--veil), var(--veil)) center 58% / calc(100% - .14em) 34% no-repeat; }
+.memorize .w.s0.cur { background: linear-gradient(var(--gilt), var(--gilt)) center 58% / calc(100% - .14em) 34% no-repeat; opacity: .55; box-shadow: none; }
+
+.legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 16px; margin-top: 16px; font-size: var(--t-xs); color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 18px; height: 10px; border-radius: 3px; display: inline-block; }
+.sw.k { background: var(--check-bg); border-bottom: 2px dotted var(--check); }
+.sw.u { border-bottom: 2px dotted var(--unclear); }
+.sw.x { background: var(--miss-bg); }
+.sw.m { border-bottom: 2px solid var(--miss); }
+.legend .tick { color: var(--ok); font-weight: 600; }
+
+/* ---------- dock ---------- */
+.dock { border-top: 1px solid var(--rule); background: var(--paper); position: relative; }
+.dock-in { max-width: 48rem; margin: 0 auto; padding-block: 10px 12px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; }
+.tally { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: var(--t-xs); color: var(--muted); font-variant-numeric: tabular-nums; min-width: 0; }
+.tally b { font-weight: 600; font-size: var(--t-sm); color: var(--ink); }
+.tally .t-check b { color: var(--check); }
+.tally .t-miss b { color: var(--miss); }
+.mic { width: 64px; height: 64px; border-radius: 50%; border: 0; background: var(--lapis); color: var(--lapis-ink); display: grid; place-items: center; box-shadow: var(--shadow); position: relative; }
+.mic::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 2px solid var(--lapis); opacity: 0; }
+.mic[data-state="listening"]::after { animation: ring 1.6s ease-out infinite; }
+.mic[data-state="starting"] { opacity: .7; }
+.mic .i-stop { display: none; }
+.mic[data-state="listening"] .i-mic, .mic[data-state="starting"] .i-mic { display: none; }
+.mic[data-state="listening"] .i-stop, .mic[data-state="starting"] .i-stop { display: block; }
+@keyframes ring { 0% { transform: scale(.92); opacity: .7; } 100% { transform: scale(1.25); opacity: 0; } }
+.dock-right { display: flex; justify-content: flex-end; }
+.btn { border: 1px solid var(--rule); background: var(--sheet); border-radius: 999px; padding: 8px 16px; font-size: var(--t-sm); font-weight: 500; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--lapis); color: var(--lapis-ink); border-color: var(--lapis); }
+.toast { position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%); background: var(--ink); color: var(--paper); font-size: var(--t-sm); padding: 8px 14px; border-radius: 999px; box-shadow: var(--shadow); max-width: calc(100vw - 32px); width: max-content; text-align: center; transition: opacity .25s; }
+.toast[data-show="0"] { opacity: 0; pointer-events: none; }
+
+/* ---------- dialogs ---------- */
+dialog { border: 1px solid var(--rule); background: var(--sheet); color: var(--ink); border-radius: 18px; padding: 0; width: min(34rem, calc(100vw - 24px)); max-height: min(80vh, 44rem); box-shadow: var(--shadow); }
+dialog::backdrop { background: rgb(10 16 18 / .45); }
+@media (max-width: 560px) {
+  dialog { margin: auto auto 0; width: 100%; max-width: 100%; border-radius: 18px 18px 0 0; border-bottom: 0; max-height: 86vh; padding-bottom: env(safe-area-inset-bottom, 0px); }
+}
+.dlg { display: flex; flex-direction: column; max-height: inherit; }
+.dlg-head { display: flex; align-items: center; gap: 10px; padding: 16px 18px 10px; }
+.dlg-head h2 { margin: 0; font-size: var(--t-lg); font-weight: 500; margin-inline-end: auto; text-wrap: balance; }
+.dlg-body { padding: 4px 18px 18px; overflow-y: auto; display: grid; gap: 14px; }
+.dlg-foot { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; padding: 12px 18px 16px; border-top: 1px solid var(--rule); }
+.hint { margin: 0; color: var(--muted); font-size: var(--t-sm); line-height: 1.55; max-width: 65ch; }
+
+.search { width: 100%; border: 1px solid var(--rule); background: var(--paper); border-radius: 10px; padding: 10px 12px; }
+.slist { display: grid; gap: 2px; }
+.srow { display: grid; grid-template-columns: 2.4rem 1fr auto; align-items: center; gap: 10px; width: 100%; text-align: start; border: 0; background: none; padding: 8px 6px; border-radius: 10px; }
+.srow:hover, .srow[aria-current="true"] { background: var(--veil); }
+.srow .n { font-variant-numeric: tabular-nums; color: var(--gilt); font-weight: 500; text-align: center; }
+.srow .nm { display: grid; min-width: 0; }
+.srow .nm b { font-weight: 500; }
+.srow .nm small { color: var(--muted); font-size: var(--t-xs); }
+.srow .ar { font-family: var(--f-quran); font-size: 1.35rem; }
+.srow.anywhere { border: 1px dashed var(--rule); grid-template-columns: 2.4rem 1fr; margin-bottom: 6px; }
+
+.word-big { font-family: var(--f-quran); font-size: 2.6rem; text-align: center; direction: rtl; line-height: 1.8; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-xs); font-weight: 500; letter-spacing: .06em; text-transform: uppercase; padding: 4px 10px; border-radius: 999px; background: var(--veil); color: var(--muted); justify-self: center; }
+.pill.ok { color: var(--ok); } .pill.check { background: var(--check-bg); color: var(--check); }
+.pill.miss { background: var(--miss-bg); color: var(--miss); }
+.heard { font-family: var(--f-quran); font-size: 1.4rem; }
+
+textarea { width: 100%; min-height: 7.5rem; border: 1px solid var(--rule); background: var(--paper); border-radius: 10px; padding: 10px 12px; direction: rtl; font-family: var(--f-quran); font-size: 1.35rem; line-height: 1.9; resize: vertical; }
+
+.demo-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.score { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.score div { border: 1px solid var(--rule); border-radius: 12px; padding: 10px 12px; display: grid; gap: 2px; }
+.score b { font-size: var(--t-xl); font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.score small { color: var(--muted); font-size: var(--t-xs); }
+.facts { display: grid; gap: 6px; font-size: var(--t-sm); color: var(--muted); }
+.facts span b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.mlist { display: grid; gap: 6px; }
+.mrow { display: grid; grid-template-columns: 3.6rem 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--rule); background: none; border-radius: 10px; padding: 8px 10px; text-align: start; width: 100%; }
+.mrow:hover { border-color: var(--muted); }
+.mrow .ref { font-variant-numeric: tabular-nums; color: var(--muted); font-size: var(--t-sm); }
+.mrow .wd { font-family: var(--f-quran); font-size: 1.3rem; direction: rtl; text-align: end; min-width: 0; }
+.mrow .wd small { font-family: var(--f-ui); font-size: var(--t-xs); color: var(--muted); display: block; direction: ltr; text-align: end; }
+.section-label { font-size: var(--t-xs); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 4px 0 -6px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+</style>
+
+<div class="app">
+  <header class="top gutter">
+    <div class="top-in">
+      <div class="brand"><b>سبق</b><span>Sabaq</span></div>
+      <button class="surah-btn" id="surahBtn" type="button" aria-haspopup="dialog">
+        <span class="en" id="surahLabel">Al-Mulk</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <button class="icon-btn" id="teachBtn" type="button" aria-pressed="true" title="Teacher mode: stop me with a sound at every mistake" aria-label="Teacher mode">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86z"/><path d="M12 7.5v5M12 16.5h.01"/></svg>
+      </button>
+      <button class="icon-btn" id="memBtn" type="button" aria-pressed="false" title="Memorization mode: hide words until you recite them" aria-label="Memorization mode">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path d="M3 3l18 18"/></svg>
+      </button>
+      <button class="icon-btn" id="typeBtn" type="button" title="Type instead or watch the demo" aria-label="Type instead or watch the demo" aria-haspopup="dialog">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg>
+      </button>
+    </div>
+  </header>
+  <div class="gutter"><div class="status" id="status" data-live="off" aria-live="polite"><span class="dot"></span><span id="statusText">Loading the Quran text…</span></div></div>
+
+  <main id="main">
+    <div class="page gutter">
+      <article class="sheet" id="sheet">
+        <div class="surah-head"><div class="ar" id="surahAr"></div><div class="meta" id="surahMeta"></div></div>
+        <div class="bism" id="bism" hidden>بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ</div>
+        <div class="quran" id="quran" lang="ar"></div>
+        <div class="legend" aria-label="What the marks mean">
+          <span><i class="sw k"></i>Check: close, worth a listen</span>
+          <span><i class="sw u"></i>Not clearly heard (not counted)</span>
+          <span><i class="sw x"></i>Wrong word</span>
+          <span><i class="sw m"></i>Skipped</span>
+          <span><b class="tick">✓</b>Fixed after a stop</span>
+        </div>
+      </article>
+    </div>
+  </main>
+
+  <footer class="dock gutter">
+    <div class="toast" id="toast" data-show="0" role="status"></div>
+    <div class="dock-in">
+      <div class="tally" id="tally">
+        <span><b id="nOk">0</b> recited</span>
+        <span class="t-check"><b id="nCheck">0</b> to check</span>
+        <span class="t-miss"><b id="nMiss">0</b> mistakes</span>
+      </div>
+      <button class="mic" id="micBtn" type="button" data-state="idle" aria-label="Start listening">
+        <svg class="i-mic" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>
+        <svg class="i-stop" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>
+      </button>
+      <div class="dock-right"><button class="btn" id="finishBtn" type="button">Finish</button></div>
+    </div>
+  </footer>
+</div>
+
+<dialog id="surahDlg" aria-labelledby="surahDlgTitle">
+  <div class="dlg">
+    <div class="dlg-head"><h2 id="surahDlgTitle">Choose where to start</h2><button class="icon-btn" type="button" data-close aria-label="Close">✕</button></div>
+    <div class="dlg-body">
+      <input class="search" id="surahSearch" type="search" placeholder="Search by name or number" autocomplete="off">
+      <div class="slist" id="surahList"></div>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="wordDlg" aria-labelledby="wordDlgTitle">
+  <div class="dlg">
+    <div class="dlg-head"><h2 id="wordDlgTitle">Word</h2><button class="icon-btn" type="button" data-close aria-label="Close">✕</button></div>
+    <div class="dlg-body" id="wordBody"></div>
+    <div class="dlg-foot" id="wordFoot"></div>
+  </div>
+</dialog>
+
+<dialog id="typeDlg" aria-labelledby="typeDlgTitle">
+  <div class="dlg">
+    <div class="dlg-head"><h2 id="typeDlgTitle">Try it without a microphone</h2><button class="icon-btn" type="button" data-close aria-label="Close">✕</button></div>
+    <div class="dlg-body">
+      <p class="hint">The demo is a student reciting Surah Al-Mulk from memory. They skip a word, restart an ayah, slip on a sound and say a wrong word. With teacher mode on, listen for the stop signal, then the tick when they fix it.</p>
+      <div class="demo-row"><button class="btn primary" id="demoBtn" type="button">Play the demo</button><button class="btn" id="burujBtn" type="button">Al-Buruj: الجنوب for الجنود</button></div>
+      <p class="hint">In teacher mode a qari recites the correct word after each stop. Then say the word, or the whole ayah, to carry on. Use headphones if you can, so the mic does not pick up the qari.</p>
+      <p class="hint">On iPhone, open <b>hassaanth.github.io/sabaq</b> in Safari for the microphone.</p>
+      <p class="hint">Or type or paste Arabic words. They go through the same engine as speech, a few words at a time.</p>
+      <textarea id="simText" lang="ar" placeholder="تبارك الذي بيده الملك"></textarea>
+    </div>
+    <div class="dlg-foot"><button class="btn" type="button" data-close>Cancel</button><button class="btn primary" id="simGo" type="button">Recite these words</button></div>
+  </div>
+</dialog>
+
+<dialog id="sumDlg" aria-labelledby="sumDlgTitle">
+  <div class="dlg">
+    <div class="dlg-head"><h2 id="sumDlgTitle">Session summary</h2><button class="icon-btn" type="button" data-close aria-label="Close">✕</button></div>
+    <div class="dlg-body" id="sumBody"></div>
+    <div class="dlg-foot"><button class="btn" id="resetBtn" type="button">Start over</button><button class="btn primary" type="button" data-close>Keep reciting</button></div>
+  </div>
+</dialog>
+
+<script src="quran-data.js"></script>
+<script src="engine.js"></script>
+<script src="audio/index.js"></script>
+<script src="app.js"></script>

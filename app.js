@@ -147,6 +147,13 @@
       }
       return;
     }
+    if (live && Input.kind === 'model' && !ModelMic.ready) {
+      st.dataset.live = 'finding';
+      const pct = ModelMic.loadPct();
+      tx.textContent = pct ? 'Getting the Quran speech model ready: ' + pct + '% (first time only, about 38 MB). You can start reciting.'
+        : 'Getting the Quran speech model ready… You can start reciting.';
+      return;
+    }
     if (live && !locked) { st.dataset.live = 'finding'; tx.textContent = 'Listening. Keep reciting and Sabaq will find where you are.'; return; }
     if (live) { st.dataset.live = 'on'; tx.textContent = 'Following you · ' + where(Math.min(view.c, M.N - 1)); return; }
     st.dataset.live = 'off';
@@ -293,10 +300,11 @@
   // when that phrase settles, so they are not judged twice.
   let phraseSkip = 0, idleTimer = 0;
   // wholePhrase: the text is a complete phrase (Claude dictation), so nothing carries over to the next one.
-  function commit(text, wholePhrase) {
+  // fromModel: words from Sabaq's own model; the qari's voice was already kept out at the microphone
+  function commit(text, wholePhrase, fromModel) {
     let words = E.tokenize(text);
     const k = Math.min(phraseSkip, words.length);
-    if (Qari.gated()) words = [];  // the qari was speaking: that is not the reciter
+    if (Qari.gated() && !fromModel) words = [];  // the qari was speaking: that is not the reciter
     else words = words.slice(k);
     phraseSkip = wholePhrase ? 0 : phraseSkip - k;
     P = null;
@@ -307,9 +315,9 @@
     clearTimeout(idleTimer);
     if (T.qi < T.q.length) idleTimer = setTimeout(() => { if (!P) { T.flush(); handleEvents(); render(); } }, 1100);
   }
-  function preview(text) {
+  function preview(text, fromModel) {
     if (E.tokenize(text).length) clearTimeout(idleTimer); // only real new speech postpones the end-of-phrase check
-    if (Qari.gated()) { phraseSkip = Math.max(phraseSkip, E.tokenize(text).length); return; }
+    if (Qari.gated() && !fromModel) { phraseSkip = Math.max(phraseSkip, E.tokenize(text).length); return; }
     const words = E.tokenize(text).slice(phraseSkip);
     if (!words.length) { if (P) { P = null; render(); } return; }
     P = T.clone();
@@ -375,10 +383,25 @@
 
   // (window.__fakeIOS is set only by the dev-only tests/fake-sr.js)
   const IS_IOS = !!window.__fakeIOS || /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const IS_SAFARI = /^((?!chrome|android|crios|fxios|edg).)*safari/i.test(navigator.userAgent);
+  // Inside claude.ai the page can't load the model (only Claude dictation is available there).
+  const IN_CLAUDE = !!(window.claude && typeof window.claude.use === 'function');
+  const MODEL_OK = !IN_CLAUDE && !!(window.Worker && window.WebAssembly && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+  // Which recogniser to use. "auto": Chrome/Edge/Android use the browser's (Google) recognition, which
+  // works well there; iPhone, Safari and Firefox use Sabaq's own Quran model.
+  function chooseKind() {
+    if (Input.dict) return 'dictation';
+    const pref = store.get('recognizer', 'auto');
+    if (pref === 'browser' && SR) return 'webspeech';
+    if (pref === 'model' && MODEL_OK) return 'model';
+    if ((IS_IOS || IS_SAFARI || !SR) && MODEL_OK) return 'model';
+    return SR ? 'webspeech' : MODEL_OK ? 'model' : 'none';
+  }
 
   function startListening() {
     if (Input.sim) stopSim();
-    if (Kbd.on) { closeKbd(); return; }
+    Input.kind = chooseKind();
     if (Input.kind === 'dictation') {
       setMic('starting');
       Input.dict.start({ language: 'ar' }).catch(err => {
@@ -390,14 +413,14 @@
       });
       return;
     }
+    if (Input.kind === 'model') { ModelMic.start(); return; }
     if (Input.kind === 'webspeech') { startWebSpeech(); return; }
-    if (IS_IOS) { openKbdHelp('This browser has no speech recognition.'); return; }
     toast('This browser has no speech recognition. Use Chrome or Safari, or type instead.', 5000);
     openType();
   }
   function stopListening() {
     if (Input.sim) { stopSim(); return; }
-    if (Kbd.on) { closeKbd(); return; }
+    if (Input.kind === 'model') { ModelMic.stop(); return; }
     if (Input.kind === 'dictation' && Input.dict) { Input.dict.stop().catch(() => {}); return; }
     Input.want = false;
     clearTimeout(Input.restartTimer);
@@ -405,7 +428,7 @@
     else { setMic('idle'); settle(); }
   }
 
-  // ---- turning a growing transcript into settled words (shared by browser speech and keyboard dictation)
+  // ---- turning a growing transcript into settled words (browser speech recognition)
   // Everything except the last two words is treated as settled (iPhone may never mark results final);
   // the last two stay live (previewed). A short silence settles them too and judges them.
   const Feed = {
@@ -427,15 +450,11 @@
         this.fed += p.length; this.pending = [];
         commit(p.join(' '));
       }
-      // silence: judge whatever is still being weighed (e.g. the last word of an ayah)
       if (!P && T.qi < T.q.length) { T.flush(); handleEvents(); render(); }
     },
   };
 
-  // ---- the browser's own speech recognition (Chrome, Edge, Safari)
-  // iPhone Safari: continuous mode is unreliable, so each phrase is its own short session, restarted
-  // after it ends. iOS may refuse a restart that is not started by a tap; then the reciter taps the
-  // mic to go on (or uses keyboard dictation, which keeps listening by itself).
+  // ---- the browser's own speech recognition (Chrome, Edge, Android; Safari only if chosen)
   function makeRec() {
     const rec = new SR();
     rec.lang = 'ar-SA';
@@ -449,8 +468,7 @@
       for (let i = 0; i < e.results.length; i++) {
         const t = e.results[i][0].transcript.trim();
         if (!t) continue;
-        // Chrome on Android repeats earlier results inside later ones
-        if (parts.length && t.startsWith(parts[parts.length - 1])) parts[parts.length - 1] = t;
+        if (parts.length && t.startsWith(parts[parts.length - 1])) parts[parts.length - 1] = t; // Android repeats
         else parts.push(t);
       }
       const last = e.results[e.results.length - 1];
@@ -458,25 +476,19 @@
     };
     rec.onerror = e => {
       const code = e.error;
-      Input.lastError = code;
       if (code === 'no-speech' || code === 'aborted') return; // silence: onend restarts
-      if (code === 'service-not-allowed' || code === 'not-allowed') {
+      if (code === 'service-not-allowed' || code === 'not-allowed' || code === 'language-not-supported') {
         Input.want = false;
-        if (Input.okOnce && IS_IOS) {
-          // it worked, then iOS refused to carry on without a tap
-          toast('Your iPhone paused listening. Tap the mic to go on, or use keyboard dictation to keep listening.', 6000);
-        } else if (IS_IOS) {
-          openKbdHelp(code === 'not-allowed'
-            ? 'Safari was not allowed to use the microphone (not-allowed).'
-            : 'Safari\'s speech recognition is turned off or blocked on this iPhone (service-not-allowed).');
+        if (MODEL_OK && !(Input.okOnce && code !== 'language-not-supported')) {
+          // the browser's recogniser is refused here: use Sabaq's own model from now on
+          store.set('recognizer', 'model');
+          syncRecSel();
+          toast('Switched to Sabaq\'s own Quran speech model. Tap the mic again.', 5000);
+        } else if (Input.okOnce) {
+          toast('Listening paused. Tap the mic to go on.', 5000);
         } else {
-          toast(code === 'not-allowed' ? 'Microphone access was blocked. Allow it in the browser, or type instead.'
-            : 'Speech recognition is blocked here (service-not-allowed). Open the site in Chrome, or type instead.', 7000);
+          toast((code === 'not-allowed' ? 'Microphone access was blocked' : 'Speech recognition is not available here') + ' (' + code + ').', 6000);
         }
-      } else if (code === 'language-not-supported') {
-        Input.want = false;
-        if (IS_IOS) openKbdHelp('Safari cannot recognise Arabic on this iPhone (language-not-supported).');
-        else toast('This browser cannot recognise Arabic speech. Try Chrome, or type instead.', 5000);
       } else if (code === 'audio-capture') {
         toast('No microphone input. Another app may be using the microphone.', 5000);
       } else if (code === 'network') {
@@ -486,8 +498,8 @@
       }
     };
     rec.onend = () => {
-      Feed.settle(); // the last words of the session were never settled: they are now
-      Feed.reset();  // a new session starts a new transcript
+      Feed.settle();
+      Feed.reset();
       if (Input.want) {
         clearTimeout(Input.restartTimer);
         Input.restartTimer = setTimeout(restartWebSpeech, IS_IOS ? 150 : 0);
@@ -506,53 +518,170 @@
       toast('Listening paused. Tap the mic to go on.', 4000);
     }
   }
-  // Called from the mic tap. Starting recognition is the first thing the tap does (iPhone is strict about it).
   function startWebSpeech() {
-    Input.want = true; Input.okOnce = false; Input.lastError = null;
+    Input.want = true; Input.okOnce = false;
     Feed.reset();
     Input.rec = makeRec();
     setMic('starting');
     try { Input.rec.start(); }
-    catch (err) {
-      Input.want = false; Input.rec = null; setMic('idle');
-      if (IS_IOS) openKbdHelp('Safari could not start speech recognition.');
-      else toast('Could not start the microphone.', 4000);
-    }
+    catch (err) { Input.want = false; Input.rec = null; setMic('idle'); toast('Could not start the microphone.', 4000); }
   }
 
-  // ---- iPhone keyboard dictation: the iPhone keyboard's own microphone types the recitation into a box,
-  // and Sabaq reads it as it is typed. Works without Safari's speech recognition, and keeps listening.
-  const Kbd = { on: false };
-  const kbdField = $('kbdField');
-  function openKbd() {
-    closeAll();
-    if (Input.state !== 'idle') stopListening();
-    Kbd.on = true;
-    kbdField.value = '';
-    Feed.reset();
-    $('kbdBar').hidden = false;
-    kbdField.focus(); // must happen inside the tap, or the keyboard won't open
-    setMic('listening');
-    toast('Tap the microphone on the keyboard, then recite', 4000);
-  }
-  function closeKbd() {
-    if (!Kbd.on) return;
-    Kbd.on = false;
-    Feed.settle(); Feed.reset();
-    kbdField.blur();
-    $('kbdBar').hidden = true;
-    setMic('idle'); settle();
-  }
-  kbdField.addEventListener('input', () => { if (Kbd.on) Feed.ingest(E.tokenize(kbdField.value), false); });
-  $('kbdDone').addEventListener('click', closeKbd);
-  function openKbdHelp(reason) {
-    closeAll();
-    $('kbdReason').textContent = reason || '';
-    $('kbdReason').hidden = !reason;
-    $('kbdDlg').showModal();
-  }
-  $('kbdGo').addEventListener('click', openKbd);
-  $('kbdOpen').addEventListener('click', openKbd);
+  // ---- Sabaq's own speech recognition: the microphone is recorded here, cut into phrases where the
+  // reciter pauses, and each phrase is transcribed by Tarteel's Quran Whisper model in a worker.
+  // While a phrase is still being recited, it is transcribed every ~1.2 s for live tracking.
+  const ModelMic = {
+    worker: null, ready: false, failed: false, files: {}, stream: null, src: null, node: null, sink: null,
+    on: false, seg: 0, inSpeech: false, buf: [], len: 0, pre: [], preLen: 0, run: 0, silence: 0,
+    floor: 0.004, busy: false, finals: [], partial: null, lastPartial: 0, rs: null, frame: [], frameLen: 0, ms: [],
+
+    loadPct() {
+      let l = 0, t = 0;
+      for (const k in this.files) { l += this.files[k].loaded; t += this.files[k].total; }
+      return t ? Math.min(99, Math.round(l / t * 100)) : 0;
+    },
+    init() {
+      if (this.worker) return;
+      this.worker = new Worker('asr-worker.js', { type: 'module' });
+      this.worker.onmessage = e => this.onMessage(e.data);
+      this.worker.onerror = () => { this.failed = true; toast('The speech model could not start in this browser.', 6000); this.stop(); };
+      this.worker.postMessage({ type: 'load' });
+    },
+    onMessage(m) {
+      if (m.type === 'progress') {
+        if (m.total) this.files[m.file] = { loaded: m.loaded, total: m.total };
+        if (this.on) renderStatus();
+      } else if (m.type === 'ready') {
+        this.ready = true; renderStatus(); this.pump();
+      } else if (m.type === 'error') {
+        this.failed = true;
+        toast('Could not download the speech model. Check the connection and tap the mic again.', 6000);
+        this.worker.terminate(); this.worker = null; this.stop();
+      } else if (m.type === 'result') {
+        this.busy = false;
+        if (m.ms) { this.ms.push(m.ms); if (this.ms.length > 8) this.ms.shift(); }
+        if (window.__asrLog) window.__asrLog.push({ kind: m.kind, seg: m.seg, ms: m.ms, text: m.text }); // dev-only test log
+        if (m.kind === 'final') commit(m.text, true, true);
+        // a live transcription is cut wherever the audio was, often mid-word: its last word is left for the final one
+        else if (m.seg === this.seg && this.inSpeech) preview(m.text.trim().split(/s+/).slice(0, -1).join(' '), true);
+        this.pump();
+        if (!this.on && !this.busy && !this.finals.length) settle();
+      }
+    },
+    async start() {
+      const a = audio(); // inside the tap: lets the qari play later (iPhone)
+      if (!a) { toast('Audio is not available in this browser.', 4000); return; }
+      setMic('starting');
+      this.init();
+      try {
+        this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+      } catch (err) {
+        setMic('idle');
+        toast(IS_IOS ? 'Microphone blocked. Allow it for this site: Settings › Safari › Microphone, then reload.'
+          : 'Microphone access was blocked. Allow it in the browser and try again.', 7000);
+        return;
+      }
+      if (a.state !== 'running') { try { await a.resume(); } catch (e) { /* tried */ } }
+      this.src = a.createMediaStreamSource(this.stream);
+      this.node = a.createScriptProcessor(4096, 1, 1);
+      this.sink = a.createGain(); this.sink.gain.value = 0; // keep the processor running without making sound
+      this.rs = { ratio: a.sampleRate / 16000, pos: 0, acc: 0, n: 0 };
+      this.node.onaudioprocess = e => this.onAudio(e.inputBuffer.getChannelData(0));
+      this.src.connect(this.node); this.node.connect(this.sink); this.sink.connect(a.destination);
+      this.on = true; this.inSpeech = false; this.buf = []; this.len = 0; this.pre = []; this.preLen = 0; this.run = 0; this.silence = 0;
+      this.stream.getAudioTracks().forEach(t => { t.onended = () => { if (this.on) { toast('The microphone stopped.', 4000); this.stop(); } }; });
+      setMic('listening');
+    },
+    stop() {
+      if (this.inSpeech) this.endSegment();
+      this.on = false;
+      try { if (this.node) { this.node.onaudioprocess = null; this.node.disconnect(); } if (this.src) this.src.disconnect(); if (this.sink) this.sink.disconnect(); } catch (e) { /* gone */ }
+      if (this.stream) this.stream.getTracks().forEach(t => t.stop());
+      this.stream = this.src = this.node = this.sink = null;
+      setMic('idle');
+      if (!this.busy && !this.finals.length) settle();
+    },
+    // resample to 16 kHz (averaging the input samples that fall in each output sample) in 20 ms frames
+    onAudio(input) {
+      if (!this.on) return;
+      const rs = this.rs;
+      for (let i = 0; i < input.length; i++) {
+        rs.acc += input[i]; rs.n++;
+        rs.pos += 1;
+        if (rs.pos >= rs.ratio) {
+          rs.pos -= rs.ratio;
+          this.frame.push(rs.acc / rs.n); rs.acc = 0; rs.n = 0;
+          if (this.frame.length === 320) { this.onFrame(Float32Array.from(this.frame)); this.frame = []; }
+        }
+      }
+    },
+    // voice activity: a phrase starts on 60 ms of sound above the noise floor and ends after 650 ms of quiet
+    onFrame(f) {
+      if (Qari.gated()) {
+        // the qari is speaking: drop what the mic hears (and forget words of the dropped phrase already used)
+        if (this.inSpeech || this.len) phraseSkip = 0;
+        this.inSpeech = false; this.buf = []; this.len = 0; this.pre = []; this.preLen = 0; this.run = 0; this.partial = null;
+        return;
+      }
+      let e = 0; for (let i = 0; i < f.length; i++) e += f[i] * f[i];
+      const rms = Math.sqrt(e / f.length);
+      const thr = Math.max(0.006, this.floor * 3);
+      const voiced = rms > thr;
+      if (!this.inSpeech) {
+        this.floor = voiced ? this.floor : this.floor * 0.95 + rms * 0.05;
+        this.pre.push(f); this.preLen += f.length;
+        while (this.preLen > 16000 * 0.35) this.preLen -= this.pre.shift().length;
+        this.run = voiced ? this.run + 1 : 0;
+        if (this.run >= 3) {
+          this.inSpeech = true; this.seg++; this.silence = 0;
+          this.buf = this.pre; this.len = this.preLen; this.pre = []; this.preLen = 0;
+          this.lastPartial = performance.now();
+        }
+        return;
+      }
+      this.buf.push(f); this.len += f.length;
+      this.silence = voiced ? 0 : this.silence + 20;
+      if (this.silence >= 650) { this.endSegment(); return; }
+      // A long phrase without a pause is cut after 12 s, only at a silent moment (never inside a stretched
+      // word); at most 25 s (the model hears up to 30 s, and costs the same for any length).
+      if ((this.len >= 16000 * 12 && rms < thr * 0.8) || this.len >= 16000 * 25) {
+        this.endSegment(); this.inSpeech = true; this.seg++; this.silence = 0; this.lastPartial = performance.now(); return;
+      }
+      // live transcription of the phrase so far (skipped when the device is too slow for it)
+      // (each run takes about 2 s in a phone browser, whatever the length; skipped on slower devices)
+      const slow = this.ms.length >= 3 && this.ms.reduce((s, v) => s + v, 0) / this.ms.length > 3500;
+      if (!this.busy && !slow && performance.now() - this.lastPartial > 1200 && this.len > 16000 * 1.5) {
+        this.lastPartial = performance.now();
+        this.partial = { kind: 'partial', seg: this.seg, audio: this.join() };
+        this.pump();
+      }
+    },
+    join() {
+      const out = new Float32Array(this.len); let o = 0;
+      for (const b of this.buf) { out.set(b, o); o += b.length; }
+      return out;
+    },
+    endSegment() {
+      // keep the whole phrase, including the quiet end: soft final syllables (a fading madd) live there
+      const audioSeg = this.join();
+      this.inSpeech = false; this.buf = []; this.len = 0; this.silence = 0; this.partial = null;
+      if (audioSeg.length > 16000 * 0.25) { this.finals.push({ kind: 'final', seg: this.seg, audio: audioSeg.slice() }); this.pump(); }
+    },
+    pump() {
+      if (this.busy || !this.ready || !this.worker) return;
+      const job = this.finals.shift() || this.partial;
+      if (job === this.partial) this.partial = null;
+      if (!job) return;
+      this.busy = true;
+      this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio }, [job.audio.buffer]);
+    },
+  };
+
+  // recogniser choice (type dialog)
+  function syncRecSel() { const s = $('recSel'); if (s) s.value = store.get('recognizer', 'auto'); }
+  $('recSel').addEventListener('change', e => { store.set('recognizer', e.target.value); toast('Speech recognition: ' + e.target.selectedOptions[0].textContent); });
+  if (!MODEL_OK) $('recSel').querySelector('option[value="model"]').disabled = true;
+  syncRecSel();
 
   // ---------------------------------------------------------------- simulated recitation
   // phrases: arrays of words; each word is "heard" in turn, a phrase settles at its end, like real speech.

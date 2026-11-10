@@ -261,6 +261,7 @@
       this.stopHeard = -99;   // heardCount when the last stop signal was given
       this.stopWord = null;   // what was heard when the reciter was stopped (null: the word was skipped)
       this.attempts = 0;      // wrong attempts at the stopped word
+      this.noRewindBefore = 0; // words before this index in q have already been re-read once after locating
     }
     clone() {
       const t = new Tracker.__Shell();
@@ -268,10 +269,10 @@
       t.c = this.c; t.q = this.q.slice(); t.qi = this.qi; t.lost = this.lost.slice();
       t.events = []; t.stats = Object.assign({}, this.stats); t.sawBismillah = this.sawBismillah;
       t.strict = this.strict; t.stopped = this.stopped; t.fixed = new Set(this.fixed);
-      t.heardCount = this.heardCount; t.stopHeard = this.stopHeard; t.stopWord = this.stopWord; t.attempts = this.attempts;
+      t.heardCount = this.heardCount; t.stopHeard = this.stopHeard; t.stopWord = this.stopWord; t.attempts = this.attempts; t.noRewindBefore = this.noRewindBefore;
       return t;
     }
-    setPosition(p) { this.c = p; this.lost = []; this.q = this.q.slice(this.qi); this.qi = 0; this.stopped = -1; }
+    setPosition(p) { this.c = p; this.lost = []; this.q = this.q.slice(this.qi); this.qi = 0; this.stopped = -1; this.noRewindBefore = 0; }
     /* Teacher mode: carry on past the word you are stopped at (it stays marked for review). */
     moveOn() {
       if (this.stopped < 0) return;
@@ -564,6 +565,22 @@
       if (!res) return false;
       if (res.ambiguous && this.lost.length < 10) return false;
       const wasLocked = this.c >= 0;
+      // Found it. Re-read the located words with the normal rules from the first clearly heard word, so
+      // a mistake in the phrase that was used to find the place (often the very first ayah) still counts.
+      // Each word is re-read at most once (no loops).
+      const anchor = res.pairs.find(x => x[2] >= STRONG && (x[3] || 1) === 1 && (x[4] || 1) === 1);
+      if (anchor && this.lost[anchor[0]] >= this.noRewindBefore) {
+        const first = anchor[1];
+        if (!wasLocked && this.sawBismillah && first === this.m.pos(1, 2)) {
+          for (let p = this.m.pos(1, 1); p < first; p++) this._mark(p, CORRECT);
+        }
+        this.noRewindBefore = this.q.length;
+        this.c = first;
+        this.qi = this.lost[anchor[0]];
+        this.lost.length = 0;
+        this.events.push({ type: wasLocked ? 'relocated' : 'locked', pos: first });
+        return true;
+      }
       for (const [i, p, s, nr, nt] of res.pairs) {
         const st = s >= STRONG ? CORRECT : CLOSE;
         for (let k = 0; k < (nt || 1); k++) this._mark(p + k, st, st === CLOSE ? words[i] : null);
@@ -585,6 +602,7 @@
       this.q = this.q.slice(drop);
       this.qi -= drop;
       this.lost = this.lost.map(i => i - drop).filter(i => i >= 0);
+      this.noRewindBefore = Math.max(0, this.noRewindBefore - drop);
     }
   }
   Tracker.__Shell = function () {};

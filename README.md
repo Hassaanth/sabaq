@@ -6,16 +6,23 @@ and only flags a mistake when the evidence says it is one.
 ## Use it on your phone
 
 Open **https://hassaanth.github.io/sabaq/** in **Safari** (iPhone) or **Chrome** (Android), tap the mic, allow
-the microphone, and recite. On iPhone, Dictation must be on: Settings > General > Keyboard > Enable Dictation.
+the microphone, and recite.
 
-**iPhone: keyboard dictation (most reliable).** Safari's speech recognition is unreliable on iPhone (it can be
-refused with `service-not-allowed`, and it stops after each phrase). Sabaq can instead follow the iPhone
-keyboard's own dictation: keyboard button › **Recite with keyboard dictation** (it also opens automatically if
-Safari refuses). Once: Settings › General › Keyboard › Keyboards › Add New Keyboard › Arabic, and Enable
-Dictation. Then tap the box, switch to the Arabic keyboard (🌐), tap the 🎤 key and recite. Tap Done to finish.
+**Two speech recognisers, picked automatically:**
 
-With Safari's recognizer on iPhone, each phrase is its own short session and Sabaq restarts it; if iOS refuses a
-restart without a tap, it says so ("Tap the mic to go on").
+* **Chrome, Edge, Android:** the browser's own recognition (Google's), the same as on a computer.
+* **iPhone, Safari, Firefox:** **Sabaq's own Quran speech model.** iPhone browsers can only use Apple's speech
+  engine, which is unreliable for this (`service-not-allowed`, stops after every phrase). So Sabaq records the
+  microphone itself and runs Tarteel's open model trained on Quran recitation
+  ([tarteel-ai/whisper-tiny-ar-quran](https://huggingface.co/tarteel-ai/whisper-tiny-ar-quran), Apache-2.0;
+  ONNX build `Sharjeelbaig/whisper-tiny-ar-quran-onnx`) on the phone, in a background worker (`asr-worker.js`,
+  Transformers.js). It downloads once (about 38 MB) and is then cached. Speech is cut into phrases where you
+  pause; each phrase takes about 2 s to transcribe (live updates while you recite); nothing is sent to a server.
+
+Choose manually under the keyboard button › Speech recognition. On real recitation by Mishary Alafasy (Al-Mulk
+1–5, Al-Buruj 12–19) the model transcribed every word and Sabaq raised no false flags; it reports wrong and
+missing words as heard instead of "autocorrecting" them, which teacher mode depends on.
+
 Headphones help: the qari's correction then doesn't reach the mic, and iPhones can play sound quietly
 through the earpiece while the mic is on. The screen is kept awake while listening.
 
@@ -30,11 +37,17 @@ Open http://localhost:5173 in Chrome or Edge (they ship Arabic speech recognitio
 Test phone speech behaviour without a phone: http://localhost:5173/?fakesr=ios (or `=android`) loads
 `tests/fake-sr.js`; then drive it from the console with `await __say([...words])` and `__endSession()`.
 
+Test the Quran model end to end without a microphone: http://localhost:5173/?fakemic=1 loads `tests/fake-mic.js`,
+which replaces the microphone with audio you schedule, e.g. real recitation cut at word boundaries:
+`await __play([{ url: 'https://download.quranicaudio.com/qdc/mishari_al_afasy/murattal/85.mp3', from: 141835, to: 143895 }])`
+(word timings: `api.qurancdn.com/api/qdc/audio/reciters/7/audio_files?chapter=85&segments=true`).
+Set `window.__asrLog = []` first to log what the model heard.
+
 `node tools/build-site.js` regenerates `index.html` (the GitHub Pages page) from `app.html`.
 
 Tests:
 ```
-node tests/engine.test.js     # 65 scenario tests, incl. teacher mode and moving on
+node tests/engine.test.js     # 67 scenario tests, incl. teacher mode and moving on
 node tests/stress.test.js     # 60,000-word noisy-recitation simulation
 ```
 

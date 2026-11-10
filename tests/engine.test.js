@@ -214,6 +214,21 @@ console.log('Recite from anywhere (auto-detect)');
   check('a look-alike first lock corrects itself as you keep reciting (47:10 vs 40:82)', w.surah === 47 && w.ayah === 12 && t.summary(...range(47, 11, 12)).correct === t.summary(...range(47, 11, 12)).correct + t.summary(...range(47, 11, 12)).pending * 0 && errs(t, range(47, 11, 12)) === 0, { at: w, s: t.summary(...range(47, 10, 12)), ev: t.events.map(e => e.type + '@' + JSON.stringify(M.where(e.pos))) });
 }
 
+{
+  // recite from anywhere, with a mistake in the very phrase used to find the place
+  const w = words(67, 1, 1).filter(x => x !== 'كل');
+  const t = new E.Tracker(M); t.strict = true;
+  for (const x of [...w, ...words(67, 2, 2)]) t.feed([x]);
+  const kull = M.pos(67, 1) + 6;
+  check('a word skipped in the first (locating) phrase still stops you', t.stopped === kull && t.state[kull] === MISSED, { stopped: t.stopped - M.pos(67, 1), st: t.state[kull] });
+}
+{
+  const w = words(112, 1, 2).slice(); w[w.indexOf('الصمد')] = 'الكريم';
+  const t = new E.Tracker(M); recite(t, [...w, ...words(112, 3, 4)], 3);
+  const p = M.pos(112, 2) + 1;
+  check('a wrong word in the first (locating) phrase is marked (no teacher mode)', t.state[p] === WRONG, { st: t.state[p] });
+}
+
 console.log('Continuity');
 {
   const t = recite(at(112, 1), [...words(112, 1, 4), 'بسم', 'الله', 'الرحمن', 'الرحيم', ...words(113, 1, 5)]);

@@ -415,6 +415,7 @@
     }
     if (Input.kind === 'model') { ModelMic.start(); return; }
     if (Input.kind === 'webspeech') { startWebSpeech(); return; }
+    if (IN_CLAUDE) { showSiteNote(); toast('The microphone is blocked inside Claude. Use the Sabaq website (link at the top).', 7000); return; }
     toast('This browser has no speech recognition. Use Chrome or Safari, or type instead.', 5000);
     openType();
   }
@@ -479,6 +480,7 @@
       if (code === 'no-speech' || code === 'aborted') return; // silence: onend restarts
       if (code === 'service-not-allowed' || code === 'not-allowed' || code === 'language-not-supported') {
         Input.want = false;
+        if (IN_CLAUDE) { showSiteNote(); toast('The microphone is blocked inside Claude. Use the Sabaq website (link at the top).', 7000); return; }
         if (MODEL_OK && !(Input.okOnce && code !== 'language-not-supported')) {
           // the browser's recogniser is refused here: use Sabaq's own model from now on
           store.set('recognizer', 'model');
@@ -676,6 +678,11 @@
       this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio }, [job.audio.buffer]);
     },
   };
+
+  // Inside claude.ai, phones (and browsers without Claude dictation) can't use the microphone: say where it works.
+  function showSiteNote() { if (IN_CLAUDE) $('siteNote').hidden = false; }
+  if (IN_CLAUDE && (IS_IOS || /Android/i.test(navigator.userAgent))) showSiteNote();
+  if (IN_CLAUDE) setTimeout(() => { if (!Input.dict) showSiteNote(); }, 11000); // claude.use answers within 10 s
 
   // recogniser choice (type dialog)
   function syncRecSel() { const s = $('recSel'); if (s) s.value = store.get('recognizer', 'auto'); }

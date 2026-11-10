@@ -86,6 +86,9 @@ button { cursor: pointer; }
 .icon-btn[aria-pressed="true"] { background: var(--lapis); color: var(--lapis-ink); }
 @media (max-width: 420px) { .brand span { display: none; } }
 
+.site-note { background: var(--check-bg); border-bottom: 1px solid var(--rule); }
+.site-in { max-width: 48rem; margin: 0 auto; padding-block: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font-size: var(--t-sm); color: var(--ink); }
+.site-in a { text-decoration: none; }
 .status { max-width: 48rem; margin: 0 auto; padding-block: 8px; font-size: var(--t-sm); color: var(--muted); display: flex; align-items: center; gap: 8px; min-height: 2.25rem; }
 .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--pending); flex: none; }
 .status[data-live="on"] .dot { background: var(--ok); animation: pulse 1.4s ease-in-out infinite; }
@@ -232,6 +235,12 @@ textarea { width: 100%; min-height: 7.5rem; border: 1px solid var(--rule); backg
       </button>
     </div>
   </header>
+  <div class="site-note gutter" id="siteNote" hidden>
+    <div class="site-in">
+      <span>Phones block the microphone inside Claude. Recite on the Sabaq website instead:</span>
+      <a class="btn primary" href="https://hassaanth.github.io/sabaq/" target="_blank" rel="noopener">Open hassaanth.github.io/sabaq</a>
+    </div>
+  </div>
   <div class="gutter"><div class="status" id="status" data-live="off" aria-live="polite"><span class="dot"></span><span id="statusText">Loading the Quran text…</span></div></div>
 
   <main id="main">

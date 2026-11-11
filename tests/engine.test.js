@@ -327,6 +327,18 @@ console.log('Recite from anywhere (auto-detect)');
   check('moving to another surah is still a deliberate move', u.stopped < 0 && M.sOf[u.c] === 17, { stopped: u.stopped, s: M.sOf[u.c] });
 }
 
+{
+  // "الحمد لله الذي" opens 6:1, 18:1, 34:1 and 35:1: with Al-Kahf open, the open surah is found at once
+  const a = new E.Tracker(M); a.hint = [M.surahs[17].start, M.surahs[17].end];
+  for (const x of words(18, 1, 1).slice(0, 4)) a.feed([x]);
+  const b = new E.Tracker(M);
+  for (const x of words(18, 1, 1).slice(0, 3)) b.feed([x]);
+  check('a shared opening goes to the surah open on screen', a.c >= M.pos(18, 1) && a.c < M.pos(18, 2), { c: a.c, kahf: M.pos(18, 1) });
+  const w = new E.Tracker(M); w.hint = [M.surahs[17].start, M.surahs[17].end];
+  for (const x of words(6, 1, 1)) w.feed([x]);
+  check('...but reciting another surah still finds that one', M.sOf[Math.max(0, w.c - 1)] === 5, { s: M.sOf[Math.max(0, w.c - 1)] + 1 });
+}
+
 console.log('Continuity');
 {
   const t = recite(at(112, 1), [...words(112, 1, 4), 'بسم', 'الله', 'الرحمن', 'الرحيم', ...words(113, 1, 5)]);

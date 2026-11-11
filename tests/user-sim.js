@@ -12,7 +12,12 @@
     if (timings[s]) return timings[s];
     const j = await fetch('https://api.qurancdn.com/api/qdc/audio/reciters/7/audio_files?chapter=' + s + '&segments=true').then(r => r.json());
     const f = j.audio_files[0], ayahs = {};
-    for (const v of f.verse_timings) ayahs[+v.verse_key.split(':')[1]] = v.segments.filter(x => x.length >= 3).map(x => [x[1], x[2]]);
+    // by word number (a reciter may repeat words: Alafasy says 18:2 words 7-8 twice): first start, last end
+    for (const v of f.verse_timings) {
+      const words = [];
+      for (const x of v.segments) { if (x.length < 3) continue; const i = x[0] - 1; if (!words[i]) words[i] = [x[1], x[2]]; else words[i][1] = Math.max(words[i][1], x[2]); }
+      ayahs[+v.verse_key.split(':')[1]] = words;
+    }
     return (timings[s] = { url: f.audio_url, ayahs });
   }
   function parse(it) {

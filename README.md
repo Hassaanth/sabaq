@@ -56,9 +56,18 @@ npm install
 npm start            # http://localhost:8787
 ```
 
-It runs two of Tarteel's open Quran models: the fast tiny one for the live readings that move the highlight,
-and the accurate base one (117/117 words on Al-Mulk 1–10 for Alafasy, Husary and Minshawi) for the final
-readings and double-checks that decide mistakes. When both models flag the same word, Sabaq stops at once.
+**Models (chosen by measurement on Al-Mulk 1–10, Alafasy / Husary / Minshawi):**
+
+| Model | Words right | Reading 1 s / 7 s of audio | Used for |
+|---|---|---|---|
+| NVIDIA Arabic FastConformer, CTC (`stt_ar_fastconformer_hybrid_large_pc_v1.0`, int8, sherpa-onnx) | 117 / 114 / 117 | **31 ms / 152 ms** | live readings and phrase readings |
+| Tarteel's Whisper base Quran model | 117 / 117 / 117 | ~800 ms / ~1,500 ms | the double-check before a stop |
+
+The FastConformer is the same model family Tarteel runs (NVIDIA NeMo); unlike Whisper, which always processes a
+30-second window and writes text out piece by piece, it reads only the audio you said, in one pass. Highlight
+lag after each word (Al-Mulk 1–5, phone-speed CPU): about 0.5 s typical, against 1.5 s with Whisper. The
+double-check uses a different kind of model, so a stop needs two independent readings to agree.
+Credits: NVIDIA (CC-BY-4.0; int8 export by OmarrGhorab/openbot-personal), Tarteel AI (Apache-2.0).
 
 A page served by the server finds it by itself (it answers `/health`). Any other page can be pointed at one with
 `?asr=wss://host/asr` (remembered; `?asr=off` to stop). A phone needs HTTPS for the microphone, so the server must

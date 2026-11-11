@@ -1,8 +1,16 @@
 // Sabaq's speech server: server-side recognition, the way Tarteel does it (their app streams your voice to
-// their GPU servers; Chrome on a computer does the same with Google's). The phone records and cuts the
-// recitation into phrases exactly as before, and sends each phrase here instead of running the model
-// itself. Here the same model, Tarteel's open Quran Whisper (tarteel-ai/whisper-base-ar-quran, Apache-2.0),
-// runs natively, many times faster than in a phone browser.
+// their servers, where NVIDIA NeMo FastConformer models run; Chrome on a computer does the same with Google's).
+// The phone records and cuts the recitation into phrases, uploads the audio, and gets the words back.
+//
+// Two kinds of model, chosen by measurement on real recitation (Al-Mulk 1-10, Alafasy / Husary / Minshawi):
+//  - NVIDIA's Arabic FastConformer, CTC (stt_ar_fastconformer_hybrid_large_pc_v1.0, CC-BY-4.0, credit:
+//    NVIDIA; int8 export for sherpa-onnx). 117/114/117 of 117 words, and it reads only the audio you said:
+//    31 ms for 1 s of audio, 152 ms for 7 s. Used for the live readings that move the highlight and for
+//    each phrase's reading.
+//  - Tarteel's Whisper base Quran model (tarteel-ai/whisper-base-ar-quran, Apache-2.0): 117/117/117, but about
+//    1.5 s per reading (Whisper always hears 30 s). Used only for the double-check before a stop: a different
+//    kind of model, so the two readings are independent.
+// If the FastConformer can't be loaded, the server falls back to Whisper for everything.
 //
 //   cd server && npm install && npm start          -> http://localhost:8787  (site + WebSocket at /asr)
 //
@@ -12,21 +20,18 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
+import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import { pipeline, env } from '@huggingface/transformers';
 
+const require = createRequire(import.meta.url);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SITE = path.join(HERE, '..');
 const PORT = +process.env.PORT || 8787;
-// Tarteel's base Quran model: on a server there is no phone to spare, so the larger, more accurate model
-// (on Al-Mulk 1-10: 117/117 words for each of Alafasy, Husary and Minshawi, against 116, 112 and 112 for the
-// tiny model the phone runs itself)
 const MODEL = process.env.MODEL || 'eventhorizon0/tarteel-ai-onnx-whisper-base-ar-quran';
-// Live readings (re-read every moment while you recite, only to move the highlight) use the tiny model:
-// about 3x faster, so tracking is smoother. Final readings and double-checks, which decide mistakes, use
-// the accurate model. LIVE_MODEL=same uses one model for both.
-const LIVE_MODEL = process.env.LIVE_MODEL === 'same' ? MODEL : (process.env.LIVE_MODEL || 'Sharjeelbaig/whisper-tiny-ar-quran-onnx');
+const FALLBACK_LIVE = 'Sharjeelbaig/whisper-tiny-ar-quran-onnx';
 // Some model builds cannot be told the language (their config lacks the table); Arabic Quran is all they know
 async function read(p, audio, extra) {
   if (!p.gen) p.gen = { language: 'ar', task: 'transcribe' };
@@ -35,47 +40,81 @@ async function read(p, audio, extra) {
 }
 // model files are cached outside the app folder (HF_CACHE to choose; a sandboxed folder can hide files from the runtime)
 env.cacheDir = process.env.HF_CACHE || path.join(os.tmpdir(), 'sabaq-hf-cache');
-
-// ---- the models. One lane by default: final readings first, then live ones. LANES=2 reads a live reading and
-// a final reading side by side; it only helps with plenty of CPU cores or a GPU (measured on a 6-core PC: the
-// two models slowed each other down, highlight lag 1.8 s instead of 1.5 s).
-let asr = null, asrLive = null, warm = 0;
-const t0 = Date.now();
 const CORES = os.cpus().length;
-const LANES = +process.env.LANES || 1;
-const opts = { dtype: 'q8', session_options: { intraOpNumThreads: +process.env.THREADS || Math.max(1, Math.min(4, Math.floor(CORES / LANES))) } };
-async function ready(name) {
-  const p = await pipeline('automatic-speech-recognition', name, opts);
-  await read(p, new Float32Array(16000), {});           // warm up
-  return p;
+const THREADS = +process.env.THREADS || Math.max(1, Math.min(4, CORES >> 1 || 1));
+
+// ---- NVIDIA Arabic FastConformer (CTC), via sherpa-onnx; downloaded once, checked against its published hashes
+const CTC_DIR = path.join(env.cacheDir, 'fastconformer-ar-ctc');
+const CTC_URL = 'https://github.com/OmarrGhorab/openbot-personal/releases/download/models-fastconformer-ar-v1/';
+const CTC_FILES = {
+  'model.int8.onnx': 'ce25098a710db5bf44284530707559f7b4be9b12cfc550816b5f9cc869a3c121',
+  'tokens.txt': 'b5d39b52143723e71d997ed5dd8a68aa5facbd0a7c84a47669f83b0033d33164',
+};
+const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+async function loadCtc() {
+  if (process.env.NO_CTC) return null;
+  fs.mkdirSync(CTC_DIR, { recursive: true });
+  for (const [name, hash] of Object.entries(CTC_FILES)) {
+    const file = path.join(CTC_DIR, name);
+    if (fs.existsSync(file) && sha256(file) === hash) continue;
+    console.log('downloading', name, '…');
+    const r = await fetch(CTC_URL + name);
+    if (!r.ok) throw new Error('download ' + name + ': HTTP ' + r.status);
+    fs.writeFileSync(file + '.part', Buffer.from(await r.arrayBuffer()));
+    if (sha256(file + '.part') !== hash) throw new Error(name + ': checksum mismatch');
+    fs.renameSync(file + '.part', file);
+  }
+  const sherpa = require('sherpa-onnx-node');
+  const rec = new sherpa.OfflineRecognizer({
+    featConfig: { sampleRate: 16000, featureDim: 80 },
+    modelConfig: { nemoCtc: { model: path.join(CTC_DIR, 'model.int8.onnx') }, tokens: path.join(CTC_DIR, 'tokens.txt'), numThreads: THREADS, provider: 'cpu', debug: 0 },
+    decodingMethod: 'greedy_search',
+  });
+  const fn = async audio => { const st = rec.createStream(); st.acceptWaveform({ samples: audio, sampleRate: 16000 }); await rec.decodeAsync(st); return rec.getResult(st).text || ''; };
+  await fn(new Float32Array(16000)); // warm up
+  return fn;
 }
+async function loadWhisper(name) {
+  const p = await pipeline('automatic-speech-recognition', name, { dtype: 'q8', session_options: { intraOpNumThreads: THREADS } });
+  await read(p, new Float32Array(16000), {});
+  return async audio => { const r = await read(p, audio, { max_new_tokens: Math.min(440, Math.ceil(audio.length / 16000 * 20) + 16) }); return (r && r.text) || ''; };
+}
+
+// ---- models and lanes. "fast" reads live readings and phrase readings; "slow" reads the double-checks, so live
+// tracking never waits behind one.
+const read$ = { fast: null, slow: null };
+let warm = 0, LANES = 1, NAMES = {};
+const t0 = Date.now();
 const loading = (async () => {
-  asr = await ready(MODEL);
-  asrLive = LIVE_MODEL === MODEL ? asr : await ready(LIVE_MODEL);
-  const t = Date.now(); await read(asrLive, new Float32Array(16000), { max_new_tokens: 8 }); warm = Date.now() - t;
-  console.log(`${LANES} lane(s), ${opts.session_options.intraOpNumThreads} threads each; models ready in ${((Date.now() - t0) / 1000).toFixed(1)} s (final: ${MODEL}; live: ${LIVE_MODEL}; a live reading costs ~${warm} ms + text)`);
+  let ctc = null;
+  try { ctc = await loadCtc(); } catch (e) { console.error('FastConformer not available (' + e.message + '); using Whisper only.'); }
+  const whisper = await loadWhisper(MODEL);
+  if (ctc) { read$.fast = ctc; read$.slow = whisper; LANES = 2; NAMES = { live: 'fastconformer-ctc', final: 'fastconformer-ctc', verify: 'whisper-base' }; }
+  else { read$.fast = await loadWhisper(FALLBACK_LIVE); read$.slow = whisper; LANES = 1; NAMES = { live: 'whisper-tiny', final: 'whisper-base', verify: 'whisper-base' }; }
+  const t = Date.now(); await read$.fast(new Float32Array(16000)); warm = Date.now() - t;
+  console.log(`models ready in ${((Date.now() - t0) / 1000).toFixed(1)} s: ${JSON.stringify(NAMES)}, ${THREADS} threads; a live reading costs ~${warm} ms`);
 })();
+// which model reads which kind of job
+const modelFor = kind => (NAMES.live === 'fastconformer-ctc' ? (kind === 'verify' ? read$.slow : read$.fast) : (kind === 'partial' ? read$.fast : read$.slow));
+const laneFor = kind => (LANES >= 2 ? (kind === 'verify' ? 'slow' : 'fast') : 'one');
 
 const queue = [];
-const busy = { live: false, final: false, one: false };
+const busy = { fast: false, slow: false, one: false };
 function pump() {
-  if (!asr || !asrLive) return;
-  const take = live => { const i = queue.findIndex(j => (j.kind === 'partial') === live); return i < 0 ? null : queue.splice(i, 1)[0]; };
-  if (LANES >= 2) {
-    if (!busy.final) { const j = take(false); if (j) run(j, 'final'); }
-    if (!busy.live) { const j = take(true); if (j) run(j, 'live'); }
-  } else if (!busy.one) {
-    const j = take(false) || take(true); if (j) run(j, 'one');
+  if (!read$.fast || !read$.slow) return;
+  for (const lane of LANES >= 2 ? ['fast', 'slow'] : ['one']) {
+    if (busy[lane]) continue;
+    // phrase readings and double-checks first, then live readings
+    let i = queue.findIndex(j => laneFor(j.kind) === lane && j.kind !== 'partial');
+    if (i < 0) i = queue.findIndex(j => laneFor(j.kind) === lane);
+    if (i >= 0) run(queue.splice(i, 1)[0], lane);
   }
 }
 async function run(job, lane) {
   busy[lane] = true;
   const t = Date.now();
   let text = '', error;
-  try {
-    const r = await read(job.kind === 'partial' ? asrLive : asr, job.audio, { max_new_tokens: Math.min(440, Math.ceil(job.audio.length / 16000 * 20) + 16) });
-    text = (r && r.text) || '';
-  } catch (e) { error = String((e && e.message) || e); }
+  try { text = await modelFor(job.kind)(job.audio); } catch (e) { error = String((e && e.message) || e); }
   busy[lane] = false;
   if (job.ws.readyState === 1) job.ws.send(JSON.stringify({ type: 'result', id: job.id, kind: job.kind, seg: job.seg, text, error, ms: Date.now() - t, secs: job.audio.length / 16000 }));
   pump();
@@ -88,7 +127,7 @@ const FILES = new Set(['index.html', 'app.js', 'engine.js', 'quran-data.js', 'as
 const server = http.createServer((req, res) => {
   let name = decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '') || 'index.html';
   // (the Sabaq website on GitHub Pages checks this from its own address: allow it)
-  if (name === 'health') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'cross-origin-resource-policy': 'cross-origin' }); res.end(JSON.stringify({ ready: !!(asr && asrLive), warm, queued: queue.length })); return; }
+  if (name === 'health') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'cross-origin-resource-policy': 'cross-origin' }); res.end(JSON.stringify({ ready: !!(read$.fast && read$.slow), warm, queued: queue.length, models: NAMES })); return; }
   if (!FILES.has(name)) { res.writeHead(404); res.end('not found'); return; }
   // (no cross-origin isolation headers: Safari would then refuse the in-browser fallback model's code)
   res.writeHead(200, { 'content-type': TYPES[path.extname(name)], 'cache-control': 'no-cache' });
@@ -103,8 +142,8 @@ const toFloat = (pcm) => { const s = new Int16Array(pcm.buffer, pcm.byteOffset, 
 const wss = new WebSocketServer({ server, path: '/asr', maxPayload: 16000 * 2 * 32 + 4096 });
 wss.on('connection', ws => {
   const segs = new Map(); // seg -> { parts: Float32Array[], len }
-  const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true, lanes: LANES }));
-  if (asr && asrLive) hello(); else loading.then(hello);
+  const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true, lanes: LANES, models: NAMES }));
+  if (read$.fast && read$.slow) hello(); else loading.then(hello);
   ws.on('message', (data, isBinary) => {
     if (!isBinary) return;
     const buf = Buffer.isBuffer(data) ? data : Buffer.concat(data);

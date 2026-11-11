@@ -110,6 +110,9 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-b
 .bism { font-family: var(--f-quran); text-align: center; font-size: calc(var(--quran-size) * .95); color: var(--muted); margin: 8px 0 4px; }
 .quran { position: relative; direction: rtl; font-family: var(--f-quran); font-size: var(--quran-size); line-height: 2.35; text-align: justify; text-align-last: center; word-spacing: .06em; }
 .quran.big { font-size: calc(var(--quran-size) * 1.12); }
+/* sections of ayahs: one flowing text each; off-screen sections are skipped by the browser until scrolled to */
+.quran .sec { content-visibility: auto; contain-intrinsic-size: auto 18em; }
+.quran .sec + .sec { margin-top: .2em; }
 
 .w { position: relative; z-index: 1; color: var(--pending); border-radius: .28em; padding: 0 .07em; transition: color .25s ease-out, background-color .25s ease-out; cursor: pointer; text-decoration-skip-ink: none; }
 /* the reading light: glides under the word you are on */
@@ -317,6 +320,7 @@ textarea { width: 100%; min-height: 7.5rem; border: 1px solid var(--rule); backg
           <option value="browser">Live recognition (Google in Chrome, Apple in Safari)</option>
         </select>
         <small class="hint" id="asrSpeed"></small>
+        <small class="hint">Speech recognition: NVIDIA Arabic FastConformer (CC-BY-4.0, credit: NVIDIA) and Tarteel AI's Quran Whisper models (Apache-2.0).</small>
         <small class="hint" id="srNote" hidden>iPhone only allows its live speech recognition (instant, like on a computer) while Siri is on: Settings › Siri. Turn it on, then reload this page.</small>
       </label>
       <p class="hint">The Sabaq Quran model is Tarteel's open model trained on Quran recitation. It runs on your phone, downloads once (about 38 MB), and is used automatically on iPhone and Safari.</p>

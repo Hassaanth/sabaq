@@ -206,6 +206,8 @@
         const first = r.pairs[0][1];
         if (near >= 0 && first >= near - 300 && first <= near + 600) r.score += 0.6 - Math.abs(first - near) / 2000;
         if (this.ayahStart[first]) r.score += 0.3;
+        // the surah open on the screen is the likely one: a phrase several surahs share (الحمد لله الذي) goes there
+        if (opts.within && first >= opts.within[0] && first < opts.within[1]) r.score += 0.5;
         results.push(r);
       }
       if (!results.length) return null;
@@ -278,7 +280,7 @@
       t.c = this.c; t.q = this.q.slice(); t.qi = this.qi; t.lost = this.lost.slice();
       t.events = []; t.stats = Object.assign({}, this.stats); t.sawBismillah = this.sawBismillah;
       t.strict = this.strict; t.stopped = this.stopped; t.fixed = new Set(this.fixed);
-      t.heardCount = this.heardCount; t.stopHeard = this.stopHeard; t.stopWord = this.stopWord; t.attempts = this.attempts; t.noRewindBefore = this.noRewindBefore; t.letContinue = this.letContinue;
+      t.heardCount = this.heardCount; t.stopHeard = this.stopHeard; t.stopWord = this.stopWord; t.attempts = this.attempts; t.noRewindBefore = this.noRewindBefore; t.letContinue = this.letContinue; t.hint = this.hint;
       return t;
     }
     setPosition(p) { this.c = p; this.lost = []; this.q = this.q.slice(this.qi); this.qi = 0; this.stopped = -1; this.noRewindBefore = 0; }
@@ -607,7 +609,7 @@
       if (this.lost.length < 3) return false;
       if (this.stopped >= 0 && this.lost.length < 10) return false; // stopped: don't drift ahead unless clearly elsewhere
       const words = this.lost.map(i => this.q[i]);
-      const res = this.m.locate(words, { near: this.c });
+      const res = this.m.locate(words, { near: this.c, within: this.c < 0 ? this.hint : null });
       if (!res) return false;
       if (res.ambiguous && this.lost.length < 10) return false;
       const wasLocked = this.c >= 0;

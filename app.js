@@ -26,10 +26,12 @@
   // One soft highlight that glides from word to word (instead of a box blinking on each word in turn)
   const glide = document.createElement('span');
   glide.className = 'glide'; glide.setAttribute('aria-hidden', 'true');
-  let glideAt = null;
+  let glideAt = null, glideSpan = null;
   function moveGlide(sp) {
+    glideSpan = sp;
     if (!sp) { glide.style.opacity = '0'; glideAt = null; return; }
-    const x = sp.offsetLeft, y = sp.offsetTop, w = sp.offsetWidth, h = sp.offsetHeight;
+    const r = sp.getBoundingClientRect(), q = quranEl.getBoundingClientRect();
+    const x = r.left - q.left, y = r.top - q.top, w = r.width, h = r.height;
     const jump = !glideAt || Math.abs(glideAt.y - y) > 4;   // a new line: appear there, don't slide across
     if (jump) glide.style.transition = 'none';
     glide.style.transform = 'translate(' + x + 'px,' + y + 'px)';
@@ -38,7 +40,7 @@
     if (jump) { void glide.offsetWidth; glide.style.transition = ''; }
     glideAt = { y };
   }
-  window.addEventListener('resize', () => { glideAt = null; moveGlide(curSpan); });
+  window.addEventListener('resize', () => { glideAt = null; glideSpan = null; render(false); });
 
   // Live recognisers revise their guesses as you speak and briefly drop a word they had. Progress already
   // shown is held for a moment, so words don't flick back to grey and the highlight doesn't step back,
@@ -72,22 +74,27 @@
     quranEl.classList.toggle('big', su.end - su.start < 120);
     const frag = document.createDocumentFragment();
     spans = new Array(su.end - su.start);
+    const one = su.end - su.start <= 160;          // a short surah stays one flowing block
+    let sec = null, inSec = 0;
+    const newSec = () => { sec = document.createElement('div'); sec.className = 'sec'; frag.append(sec); inSec = 0; };
+    newSec();
     for (let p = su.start; p < su.end; p++) {
       const sp = document.createElement('span');
       sp.className = 'w s0';
       sp.dataset.p = p;
       sp.textContent = M.disp[p];
       spans[p - su.start] = sp;
-      frag.append(sp, ' ');
+      sec.append(sp, ' '); inSec++;
       if (p + 1 === su.end || M.ayahStart[p + 1]) {
         const a = document.createElement('span');
         a.className = 'aya';
         a.textContent = '۝' + toAr(M.aOf[p]);
         a.setAttribute('aria-label', 'ayah ' + M.aOf[p]);
-        frag.append(a, ' ');
+        sec.append(a, ' ');
+        if (!one && inSec >= 70 && p + 1 < su.end) newSec();   // sections of whole ayahs, ~70+ words each
       }
     }
-    glide.style.opacity = '0';
+    glide.style.opacity = '0'; glideSpan = null;
     quranEl.replaceChildren(glide, frag);
     lastVis = new Int8Array(su.end - su.start).fill(-1);
     hold.c = -1;
@@ -119,7 +126,18 @@
     return c;
   }
 
+  // Updates arrive many times a second (live readings, previews, timers): they are drawn once per frame.
+  let renderQueued = false, renderFollow = false;
   function render(follow = true) {
+    renderFollow = renderFollow || follow;
+    if (renderQueued) return;
+    renderQueued = true;
+    const go = () => { if (!renderQueued) return; renderQueued = false; const f = renderFollow; renderFollow = false; renderNow(f); };
+    requestAnimationFrame(go);
+    setTimeout(go, 120); // (a background tab gets no animation frames)
+  }
+  function renderNow(follow) {
+    if (shown >= 0) T.hint = [M.surahs[shown].start, M.surahs[shown].end]; // (finding your place prefers the open surah)
     const view = P || T;
     const a = anchorOf(view);
     if (a >= 0 && M.sOf[a] !== shown) buildSurah(M.sOf[a]);
@@ -132,7 +150,8 @@
     if (curSpan) curSpan.classList.remove('cur');
     curSpan = null;
     if (c >= su.start && c < su.end) { curSpan = spans[c - su.start]; curSpan.classList.add('cur'); }
-    moveGlide(curSpan && !(T.strict && T.stopped >= 0) ? curSpan : null);
+    const g = curSpan && !(T.strict && T.stopped >= 0) ? curSpan : null;
+    if (g !== glideSpan || !glideAt) moveGlide(g);   // (measuring the page costs a layout: only when it moved)
     if (follow && curSpan && c !== lastCursor) followCursor();
     lastCursor = c;
     renderTally();
@@ -755,11 +774,12 @@
   // ---- Sabaq's own speech recognition: the microphone is recorded here, cut into phrases where the
   // reciter pauses, and each phrase is transcribed by Tarteel's Quran Whisper model in a worker.
   // While a phrase is still being recited, it is transcribed every ~1.2 s for live tracking.
+  const SLOW_MS = +new URLSearchParams(location.search).get('slowms') || 5000; // (dev: ?slowms= tests the slow-device mode)
   const ModelMic = {
     worker: null, ready: false, failed: false, files: {}, stream: null, src: null, node: null, sink: null,
     on: false, seg: 0, inSpeech: false, buf: [], len: 0, pre: [], preLen: 0, run: 0, silence: 0,
     floor: 0.004, busy: false, finals: [], partial: null, lastPartial: 0, rs: null, frame: [], frameLen: 0, ms: [],
-    busyKind: '', busyP: false, busyF: false, lanes: 1, pendingFinal: new Set(), cutNow: false, cutAt: 0, cutMid: new Set(), costA: 1000, perSec: [], agree: { seg: -1, prev: [], done: 0, locked: [] }, judgedSeg: 0, threads: 1, chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
+    busyKind: '', slowCached: false, chunkCached: 7, busyP: false, busyF: false, lanes: 1, pendingFinal: new Set(), cutNow: false, cutAt: 0, cutMid: new Set(), costA: 1000, perSec: [], agree: { seg: -1, prev: [], done: 0, locked: [] }, judgedSeg: 0, threads: 1, chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
 
     loadPct() {
       let l = 0, t = 0;
@@ -801,7 +821,7 @@
         if (m.total) this.files[m.file] = { loaded: m.loaded, total: m.total };
         if (this.on) renderStatus();
       } else if (m.type === 'ready') {
-        this.ready = true; this.threads = m.threads || 1; this.lanes = m.lanes || 1; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
+        this.updateSpeed(); this.ready = true; this.threads = m.threads || 1; this.lanes = m.lanes || 1; this.models = m.models || null; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
       } else if (m.type === 'error') {
         this.failed = true;
         toast('Could not download the speech model. Check the connection and tap the mic again.', 6000);
@@ -824,7 +844,7 @@
           if ([...this.pendingFinal].some(x => x < m.seg)) this.peek(m.text, m.seg, whole);
           else this.chain = this.chain.then(() => this.live(m.text, m.seg, whole)).catch(() => {});
         }
-        this.showSpeed();
+        this.updateSpeed(); this.showSpeed();
         this.pump();
         if (!this.on && !this.busy && !this.finals.length) settle();
       }
@@ -977,7 +997,7 @@
       // live reading of the phrase so far, whenever the model is free (on a slow phone that is back to back);
       // not in a long pause that may be the end of the phrase, so the final reading never waits behind one.
       // The best moment is the short pause between two words (the last word is then complete): read there too.
-      const due = this.silence < 200 && performance.now() - this.lastPartial > (this.remote ? 200 : 500);
+      const due = this.silence < 200 && performance.now() - this.lastPartial > (this.remote ? (this.costA < 150 ? 120 : 200) : 500);
       const gap = this.silence >= 100 && this.silence < 300;
       if ((this.twoLanes() ? !this.busyP : (!this.busy && !this.finals.length)) && !this.slowDevice() && (due || gap) && this.len > (this.lastPartialLen || 0) + 3200 && this.len > 16000 * (this.remote ? 0.6 : 1.2)) {
         this.lastPartial = performance.now(); this.lastPartialLen = this.len;
@@ -1020,7 +1040,8 @@
       let n = start;
       // (only words the tracker has confirmed: the last word or two still wait for what follows them, and
       // locking those in could lock in a garbled word before it is judged)
-      for (let j = words.length; j > n; j--) { const ok = cleanFeed(words.slice(start, j)); if (ok > 0) { n = start + ok; break; } }
+      // (before your place is found, one try: each try searches the whole Quran, and nothing locks in until then)
+      for (let j = words.length; j > n; j--) { const ok = cleanFeed(words.slice(start, j)); if (ok > 0) { n = start + ok; break; } if (T.c < 0) break; }
       if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, text: 'locked ' + start + '->' + n + ' of ' + words.length + ' | T.c=' + T.c + ' q=' + T.q.length + ' qi=' + T.qi }); // dev-only
       if (n > start) {
         const fresh = words.slice(start, n); A.locked.push(...fresh); A.done = A.locked.length; P = null; T.feed(fresh);
@@ -1030,7 +1051,7 @@
       // A mistake shown by a live reading (and confirmed by the words after it): don't wait for the reciter to
       // pause; end the phrase now, so its final reading and double-check (and the stop) come at once. The
       // double-check still decides: a garble in one reading never stops anyone.
-      if (T.strict && seg === this.seg && this.inSpeech && words.length > n) {
+      if (T.strict && T.c >= 0 && seg === this.seg && this.inSpeech && words.length > n) {
         const stopAt = ws => { const C = T.clone(); C.feed(ws); const st = C.events.find(e => e.type === 'stop'); return st ? st.pos : -1; };
         const rest = words.slice(n);
         let at = stopAt(rest);
@@ -1063,9 +1084,11 @@
     // would fall further and further behind, so each stretch of audio is read once, in chunks cut at the
     // gaps between words, long enough that the device keeps up (the delay then stays the same).
     // (live re-reading keeps up while reading 7 s of audio takes under ~70% of those 7 s)
-    slowDevice() { return this.cost(7) > (+new URLSearchParams(location.search).get("slowms") || 5000); },
-    chunkSecs() {
-      if (!this.slowDevice()) return 7;
+    slowDevice() { return this.slowCached; },
+    updateSpeed() { this.slowCached = this.cost(7) > SLOW_MS; this.chunkCached = this.computeChunk(); },
+    chunkSecs() { return this.chunkCached || 7; },
+    computeChunk() {
+      if (!this.slowCached) return 7;
       const b = this.perSec.length ? this.perSec.slice().sort((x, y) => x - y)[this.perSec.length >> 1] / 1000 : 0.11;
       const L = (this.costA / 1000) / Math.max(0.15, 0.75 - b);   // a + b*L <= 0.75*L
       return Math.min(7, Math.max(2.5, L));
@@ -1096,7 +1119,7 @@
       if (!st1) { commit(text, true, true); return; }
       // On the speech server, live readings come from a different (faster) model than this final reading: if one
       // of them already flagged this very word, two independent models agree. Stop now, without a third reading.
-      if (this.remote && this.agree.seg === seg && this.agree.cutFor === st1.pos) {
+      if (this.remote && this.models && this.models.live !== this.models.final && this.agree.seg === seg && this.agree.cutFor === st1.pos) {
         commit(text, true, true);
         if (!P) { clearTimeout(idleTimer); T.flush(); handleEvents(); render(); }
         return;

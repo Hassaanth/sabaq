@@ -8,13 +8,17 @@ and only flags a mistake when the evidence says it is one.
 Open **https://hassaanth.github.io/sabaq/** in **Safari** (iPhone) or **Chrome** (Android), tap the mic, allow
 the microphone, and recite.
 
-**Two speech recognisers, picked automatically:**
+**Speech recognition, picked automatically:**
 
-* **The browser's live recognition, wherever it exists:** Google's in Chrome, Edge and Android, Apple's in Safari
-  on iPhone and Mac. It streams each word back at once, so the highlight follows you instantly. **On iPhone it
-  only works while Siri is on** (Settings › Siri); otherwise iOS refuses it (`service-not-allowed`).
-* **Sabaq's own Quran speech model**, where there is no live recognition (Firefox) or it is refused (iPhone with
-  Siri off). The model takes over in the same tap, and the app says how to get live tracking. Sabaq records the
+* **Computer / Android (Chrome, Edge):** the browser's live recognition (Google's servers). It streams each word
+  back at once, so the highlight follows you instantly.
+* **iPhone / Safari: Sabaq's speech server** when one is available. This is how Tarteel works: their app streams
+  your voice to their servers (NVIDIA Riva on GPUs), where the recognition runs. Sabaq's server (`server/`) runs
+  Tarteel's open Quran model natively; the phone uploads each bit of audio once (about 32 KB/s) and gets the
+  words back within about a second. See **Speech server** below.
+* **Sabaq's own Quran model in the browser**, when there is no server (or it can't be reached): slower on a phone.
+  Apple's recogniser (Siri) is not used unless chosen under the keyboard button › Speech recognition.
+  The in-browser model: Sabaq records the
   microphone itself and runs Tarteel's open model trained on Quran recitation
   ([tarteel-ai/whisper-tiny-ar-quran](https://huggingface.co/tarteel-ai/whisper-tiny-ar-quran), Apache-2.0;
   ONNX build `Sharjeelbaig/whisper-tiny-ar-quran-onnx`) on the phone, in a background worker (`asr-worker.js`,
@@ -42,6 +46,26 @@ missing words as heard instead of "autocorrecting" them, which teacher mode depe
 Headphones help: the qari's correction then doesn't reach the mic, and iPhones can play sound quietly
 through the earpiece while the mic is on. The screen is kept awake while listening.
 
+## Speech server
+
+`server/asr-server.js` serves the Sabaq website **and** the recognition (WebSocket at `/asr`) from one address:
+
+```
+cd server
+npm install
+npm start            # http://localhost:8787
+```
+
+It runs two of Tarteel's open Quran models: the fast tiny one for the live readings that move the highlight,
+and the accurate base one (117/117 words on Al-Mulk 1–10 for Alafasy, Husary and Minshawi) for the final
+readings and double-checks that decide mistakes. When both models flag the same word, Sabaq stops at once.
+
+A page served by the server finds it by itself (it answers `/health`). Any other page can be pointed at one with
+`?asr=wss://host/asr` (remembered; `?asr=off` to stop). A phone needs HTTPS for the microphone, so the server must
+be reached through HTTPS: a cloud host (`server/Dockerfile` runs as a free Hugging Face Docker Space, port 7860)
+or a tunnel to a computer running it. `MODEL=…` picks another Quran Whisper ONNX model, `THREADS=…` the CPU
+threads. If the server goes away mid-recitation, the app carries on with the in-browser model.
+
 ## Run it locally
 
 ```
@@ -58,6 +82,12 @@ which replaces the microphone with audio you schedule, e.g. real recitation cut 
 `await __play([{ url: 'https://download.quranicaudio.com/qdc/mishari_al_afasy/murattal/85.mp3', from: 141835, to: 143895 }])`
 (word timings: `api.qurancdn.com/api/qdc/audio/reciters/7/audio_files?chapter=85&segments=true`).
 Set `window.__asrLog = []` first to log what the model heard.
+
+**A simulated person reciting:** http://localhost:5173/?fakemic=1&usersim=1 also loads `tests/user-sim.js`, which
+cuts real recitation at word boundaries (Quran.com timings) and plays a script of what someone says, with
+pauses, restarts, skipped and wrong words, and taps on the mic, and records what the app shows:
+`await __sim.run([{tap: true}, '67:1', {pause: 1200}, '67:2:1-5', {pause: 2500}, '67:2:6-11', '67:4:1-3', '67:4:5-10',
+{until: 'Your turn'}, '67:4:4-10']); __sim.report()`.
 
 `node tools/build-site.js` regenerates `index.html` (the GitHub Pages page) from `app.html`.
 

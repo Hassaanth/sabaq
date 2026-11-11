@@ -251,6 +251,62 @@ console.log('Recite from anywhere (auto-detect)');
   check('joined words scored as a near merge do not stop you', t.stopped < 0 && t.state[b] === UNCLEAR && t.state[b + 1] === CORRECT, { stopped: t.stopped, st: [t.state[b], t.state[b + 1]] });
 }
 
+{
+  // the reciter's own example: "tabarakalladhi biyadihi" then words of another ayah (36:83 / 67:15):
+  // the wrong word is marked where it was said, it does not jump to Ya-Sin
+  const said = ['تبارك', 'الذي', 'بيده', 'ملكوت', 'كل', 'شيء', 'واليه', 'النشور'];
+  for (const [label, feedAs] of [['word by word', said.map(w => [w])], ['in two phrases', [said.slice(0, 2), said.slice(2)]]]) {
+    const t = new E.Tracker(M); t.strict = true; const ev = [];
+    for (const ph of feedAs) { t.feed(ph); ev.push(...t.drainEvents()); }
+    const mulk = M.pos(67, 1) + 3;
+    check('a word from another ayah is marked wrong, not a jump (' + label + ')', t.stopped === mulk && t.state[mulk] === WRONG && !ev.some(e => e.type === 'relocated'), { stopped: t.stopped - M.pos(67, 1), ev: ev.map(e => e.type) });
+  }
+}
+
+{
+  // stopped (a misheard word), the qari says it, the reciter carries on from the next word: let through
+  const t = new E.Tracker(M); t.strict = true; t.setPosition(M.pos(67, 4));
+  const w = words(67, 4, 4).slice(); w[2] = 'البصى';               // misheard: ٱلْبَصَرَ
+  for (const x of w.slice(0, 5)) t.feed([x]);
+  const b = M.pos(67, 4) + 2;
+  const stoppedFirst = t.stopped === b;
+  t.letContinue = true;                                            // the qari has said the word
+  for (const x of words(67, 4, 4).slice(3)) t.feed([x]);
+  for (const x of words(67, 5, 5).slice(0, 4)) t.feed([x]);
+  check('after the qari, carrying on with the next words lets you through (word kept for review)', stoppedFirst && t.stopped < 0 && t.state[b] !== CORRECT && t.c > M.pos(67, 5), { stoppedFirst, stopped: t.stopped, st: t.state[b], c: t.c - M.pos(67, 4) });
+  const u = new E.Tracker(M); u.strict = true; u.setPosition(M.pos(67, 4));
+  for (const x of w.slice(0, 5)) u.feed([x]);
+  for (const x of words(67, 4, 4).slice(3, 6)) u.feed([x]);
+  check('...but not before the qari has said it (you get to try first)', u.stopped === b, { stopped: u.stopped - M.pos(67, 4) });
+}
+
+{
+  // after the qari, saying the word and carrying on is a fix (a tick), not "carrying on" past it
+  const t = new E.Tracker(M); t.strict = true; t.setPosition(M.pos(67, 4));
+  const w = words(67, 4, 4);
+  for (const x of [...w.slice(0, 3), ...w.slice(4)]) t.feed([x]);   // skips كرتين
+  const k = M.pos(67, 4) + 3;
+  const stopped = t.stopped === k; t.letContinue = true; const ev = []; t.drainEvents();
+  for (const x of w.slice(3)) { t.feed([x]); ev.push(...t.drainEvents()); }
+  check('after the qari, the word itself then the rest is a fix with a tick', stopped && t.stopped < 0 && t.fixed.has(k) && !ev.some(e => e.continued), { stopped, now: t.stopped, fixed: t.fixed.has(k), ev: ev.map(e => e.type) });
+}
+
+{
+  // a child who doesn't notice the stop and keeps reciting: those words are not "tries" (no auto move-on),
+  // and after the qari, carrying on wherever they have got to lets them through
+  const t = new E.Tracker(M); t.strict = true; t.setPosition(M.pos(67, 5));
+  const a5 = words(67, 5, 5).slice(); a5[3] = 'الارض';                  // الدنيا -> الارض
+  for (const x of a5) t.feed([x]);
+  const dn = M.pos(67, 5) + 3;
+  const stopped = t.stopped === dn, triesBefore = t.attempts;
+  for (const x of words(67, 6, 6).slice(0, 4)) t.feed([x]);              // keeps going into 67:6
+  const stillStopped = t.stopped === dn && t.attempts === triesBefore;
+  t.letContinue = true; const ev = []; t.drainEvents();
+  for (const x of words(67, 6, 6).slice(4)) { t.feed([x]); ev.push(...t.drainEvents()); }
+  check('carrying on regardless is not counted as wrong tries', stopped && stillStopped, { stopped, now: t.stopped - M.pos(67, 5), tries: t.attempts });
+  check('...and after the qari it follows them where they are (no new false stop)', t.stopped < 0 && t.c >= M.pos(67, 6) + 6 && !ev.some(e => e.type === 'stop'), { now: t.stopped, c: t.c - M.pos(67, 6), ev: ev.map(e => e.type) });
+}
+
 console.log('Continuity');
 {
   const t = recite(at(112, 1), [...words(112, 1, 4), 'بسم', 'الله', 'الرحمن', 'الرحيم', ...words(113, 1, 5)]);

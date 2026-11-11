@@ -23,6 +23,36 @@
   // ---------------------------------------------------------------- rendering
   let shown = -1, spans = [], lastVis = null, curSpan = null, lastCursor = -2;
 
+  // One soft highlight that glides from word to word (instead of a box blinking on each word in turn)
+  const glide = document.createElement('span');
+  glide.className = 'glide'; glide.setAttribute('aria-hidden', 'true');
+  let glideAt = null;
+  function moveGlide(sp) {
+    if (!sp) { glide.style.opacity = '0'; glideAt = null; return; }
+    const x = sp.offsetLeft, y = sp.offsetTop, w = sp.offsetWidth, h = sp.offsetHeight;
+    const jump = !glideAt || Math.abs(glideAt.y - y) > 4;   // a new line: appear there, don't slide across
+    if (jump) glide.style.transition = 'none';
+    glide.style.transform = 'translate(' + x + 'px,' + y + 'px)';
+    glide.style.width = w + 'px'; glide.style.height = h + 'px';
+    glide.style.opacity = '1';
+    if (jump) { void glide.offsetWidth; glide.style.transition = ''; }
+    glideAt = { y };
+  }
+  window.addEventListener('resize', () => { glideAt = null; moveGlide(curSpan); });
+
+  // Live recognisers revise their guesses as you speak and briefly drop a word they had. Progress already
+  // shown is held for a moment, so words don't flick back to grey and the highlight doesn't step back,
+  // unless you really went back (a restart) or a word was judged.
+  const hold = { c: -1, tc: -1, until: 0 };
+  function shownCursor(view) {
+    let c = view.c;
+    const now = performance.now();
+    if (c < hold.c && now < hold.until && T.c >= hold.tc && T.c <= hold.c && T.stopped < 0 && view.c >= 0) c = hold.c;
+    else if (c !== hold.c) hold.until = now + 1200;
+    hold.c = c; hold.tc = T.c;
+    return c;
+  }
+
   function buildSurah(si) {
     const su = M.surahs[si];
     shown = si;
@@ -48,18 +78,21 @@
         frag.append(a, ' ');
       }
     }
-    quranEl.replaceChildren(frag);
+    glide.style.opacity = '0';
+    quranEl.replaceChildren(glide, frag);
     lastVis = new Int8Array(su.end - su.start).fill(-1);
+    hold.c = -1;
     curSpan = null; lastCursor = -2;
     main.scrollTop = 0;
     store.set('surah', su.n);
     Qari.preload(su.n);
   }
 
-  function visual(view, p) {
+  function visual(view, p, hc) {
     const s = view.state[p];
     let v;
-    if (view === T) v = s;
+    if (s === PENDING && T.state[p] === PENDING && p < hc && p >= view.c) v = TENTATIVE; // held progress
+    else if (view === T) v = s;
     else if (T.state[p] !== PENDING) v = T.state[p];
     else v = s === PENDING ? PENDING : TENTATIVE; // preview words are not settled: show progress, never a mistake
     if (v === CORRECT && T.fixed.has(p)) v += 10;
@@ -82,14 +115,15 @@
     const a = anchorOf(view);
     if (a >= 0 && M.sOf[a] !== shown) buildSurah(M.sOf[a]);
     const su = M.surahs[shown];
+    const c = shownCursor(view);
     for (let p = su.start; p < su.end; p++) {
-      const v = visual(view, p), i = p - su.start;
+      const v = visual(view, p, c), i = p - su.start;
       if (lastVis[i] !== v) { lastVis[i] = v; spans[i].className = classFor(v); }
     }
     if (curSpan) curSpan.classList.remove('cur');
     curSpan = null;
-    const c = view.c;
     if (c >= su.start && c < su.end) { curSpan = spans[c - su.start]; curSpan.classList.add('cur'); }
+    moveGlide(curSpan && !(T.strict && T.stopped >= 0) ? curSpan : null);
     if (follow && curSpan && c !== lastCursor) followCursor();
     lastCursor = c;
     renderTally();
@@ -102,8 +136,8 @@
     if (Date.now() - userScrolledAt < 3500) return;
     const r = curSpan.getBoundingClientRect(), mr = main.getBoundingClientRect();
     const y = r.top - mr.top;
-    if (y < mr.height * 0.18 || y > mr.height * 0.62) {
-      main.scrollTo({ top: main.scrollTop + y - mr.height * 0.33, behavior: reduceMotion ? 'auto' : 'smooth' });
+    if (y < mr.height * 0.16 || y > mr.height * 0.46) {
+      main.scrollTo({ top: main.scrollTop + y - mr.height * 0.32, behavior: reduceMotion ? 'auto' : 'smooth' });
     }
   }
 
@@ -143,6 +177,9 @@
         tx.replaceChildren(document.createTextNode('Your turn: say '), w, document.createTextNode(' or the whole ayah (' + at.surah + ':' + at.ayah + '), then carry on.'));
       }
       return;
+    }
+    if (live && Input.kind === 'model' && !ModelMic.ready && ModelMic.remote) {
+      st.dataset.live = 'finding'; tx.textContent = 'Connecting to Sabaq\'s speech server… You can start reciting.'; return;
     }
     if (live && Input.kind === 'model' && !ModelMic.ready) {
       st.dataset.live = 'finding';
@@ -270,6 +307,7 @@
     pos: -1, played: false, until: 0, timer: 0, started: 0,
     stop(p, state) {
       if (p !== this.pos || T.stopped !== p) { this.pos = p; this.played = false; this.until = 0; }
+      if (this.until && Date.now() - this.started < 2500) return; // words still being said in the same breath, not a new try
       clearTimeout(this.timer);
       // a wrong try after the grace, or after the qari already said it: correct at once
       if (this.played || (this.until && Date.now() > this.started + 300)) { this.until = 0; this.qari(); return; }
@@ -292,6 +330,7 @@
     },
     qari() {
       this.played = true;
+      T.letContinue = true; // having heard the word, carrying on with the next words is allowed
       Qari.play(this.pos, 150);
     },
     waiting() { return this.until > 0 && T.stopped === this.pos; },
@@ -327,7 +366,8 @@
         Coach.stop(e.pos, e.state);
       }
       else if (e.type === 'moveOn') {
-        toast((e.auto ? 'Moving on after 3 tries. ' : 'Moving on. ') + M.disp[e.pos] + ' is marked for review.', 3200);
+        toast((e.continued ? 'Carrying on. ' : e.auto ? 'Moving on after 3 tries. ' : 'Moving on. ') + M.disp[e.pos] + ' is marked for review.', 3200);
+        Coach.reset(); render(false);
       }
       else if (e.type === 'selfCorrected') {
         if (T.strict && T.fixed.has(e.pos)) { soundFixed(); toast('Correct. Carry on.'); }
@@ -373,15 +413,67 @@
     render();
   }
   function settle() { P = null; T.flush(); handleEvents(); render(); }
+  // Two readings of the same phrase, word by word: aligned (edit distance), and where they differ, the word
+  // (or absence of a word) that the tracker accepts without a mistake is kept, judged with the two words that
+  // follow. Where neither fits, the first reading's word stays (a mistake both heard).
+  function consensus(a, b) {
+    const n = a.length, m = b.length, D = [];
+    for (let i = 0; i <= n; i++) { D.push(new Float32Array(m + 1)); D[i][0] = i; }
+    for (let j = 0; j <= m; j++) D[0][j] = j;
+    for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) {
+      const sub = a[i - 1] === b[j - 1] ? 0 : E.sim(a[i - 1], b[j - 1]) >= 0.5 ? 0.6 : 1.2;
+      D[i][j] = Math.min(D[i - 1][j - 1] + sub, D[i - 1][j] + 1, D[i][j - 1] + 1);
+    }
+    const cols = [];
+    for (let i = n, j = m; i > 0 || j > 0;) {
+      if (i > 0 && j > 0 && D[i][j] === D[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : E.sim(a[i - 1], b[j - 1]) >= 0.5 ? 0.6 : 1.2)) { cols.push([a[i - 1], b[j - 1]]); i--; j--; }
+      else if (i > 0 && D[i][j] === D[i - 1][j] + 1) { cols.push([a[i - 1], null]); i--; }
+      else { cols.push([null, b[j - 1]]); j--; }
+    }
+    cols.reverse();
+    const out = [];
+    // (judged as the end of the phrase, which it is: a last word is then judged too)
+    const fits = words => { const C = T.clone(); C.feed(words); C.flush(); return !C.events.some(e => e.type === 'stop' || e.type === 'mistake'); };
+    for (let k = 0; k < cols.length; k++) {
+      const [x, y] = cols[k];
+      if (x === y) { out.push(x); continue; }
+      const next = []; for (let q = k + 1; q < cols.length && next.length < 2; q++) { const w = cols[q][0] || cols[q][1]; if (w) next.push(w); }
+      const opts = [x, y].filter((w, i, all) => all.indexOf(w) === i);   // first reading's word first
+      let pick = x;
+      for (const w of opts) { const cand = w ? [...out, w, ...next] : [...out, ...next]; if (fits(cand)) { pick = w; break; } }
+      if (pick) out.push(pick);
+    }
+    return out;
+  }
+
+  // Where, in a reading of a phrase, the words already locked in (from earlier readings of it) end: the
+  // position after the best match of their last words, near where counting would put it. -1: not found.
+  function alignAfter(words, locked) {
+    const n = locked.length; if (!n) return 0;
+    let best = -1, bestScore = 0;
+    for (let j = Math.max(1, n - 3); j <= Math.min(words.length, n + 3); j++) {
+      // (the same word as the tracker sees it: a reading may spell it a little differently, زين / زينا)
+      let sc = 0; for (let k = 1; k <= Math.min(3, n, j); k++) { const a = words[j - k], b = locked[n - k]; if (a === b || E.sim(a, b) >= 0.7) sc++; else break; }
+      if (sc > bestScore || (sc && sc === bestScore && Math.abs(j - n) < Math.abs(best - n))) { best = j; bestScore = sc; }
+    }
+    return best;
+  }
+
   // How many of these words can be locked in: feeding them changes nothing but marking words right (no
   // mistake, no stop, nothing unclear), counting only the words the tracker has already confirmed.
   function cleanFeed(words) {
     const C = T.clone();
     C.feed(words);
-    if (C.events.some(e => e.type === 'stop' || e.type === 'mistake' || e.type === 'relocated')) return 0;
+    // (an extra word the tracker set aside, or a repeat, is not simply right either: the final reading decides)
+    if (C.events.some(e => e.type === 'stop' || e.type === 'mistake' || e.type === 'relocated' || e.type === 'restart')) return 0;
+    if (C.stats.extras > T.stats.extras) return 0;
+    // (a word the tracker could not place, kept aside in case the reciter moved elsewhere, is not right either)
+    if (C.lost.length > T.lost.length || (T.c >= 0 && C.c < T.c)) return 0;
     const a = T.state, b = C.state;
     for (let p = 0; p < b.length; p++) if (b[p] !== a[p] && b[p] !== CORRECT) return 0;
-    return Math.max(0, words.length - (C.q.length - C.qi));
+    // locked words must have moved the cursor on by as many words
+    const ok = Math.max(0, words.length - (C.q.length - C.qi));
+    return T.c >= 0 && C.c - T.c < ok ? Math.max(0, C.c - T.c) : ok;
   }
 
   // ---------------------------------------------------------------- speech input
@@ -450,7 +542,7 @@
     const pref = store.get('recognizer2', 'auto');
     if (pref === 'browser' && SR) return 'webspeech';
     if (pref === 'model' && MODEL_OK) return 'model';
-    if (SR && !Input.srRefused) return 'webspeech';
+    if (SR && !Input.srRefused && !(IS_IOS || IS_SAFARI)) return 'webspeech';
     return MODEL_OK ? 'model' : SR ? 'webspeech' : 'none';
   }
   // The browser's live recognition was refused: carry on with Sabaq's own model, in the same tap.
@@ -595,6 +687,53 @@
     catch (err) { Input.want = false; Input.rec = null; setMic('idle'); toast('Could not start the microphone.', 4000); }
   }
 
+  // ---- Sabaq's speech server: recognition on a server, the way Tarteel does it (and Google for Chrome).
+  // Same messages as the in-browser worker. Each phrase's audio is uploaded once, as it grows (16-bit,
+  // 32 KB/s); a reading then only names the phrase and how much of it to read.
+  class RemoteASR {
+    constructor(url, onFail) {
+      this.onmessage = null; this.sent = new Map(); this.queue = []; this.open = false; this.ended = false;
+      const ws = this.ws = new WebSocket(url); ws.binaryType = 'arraybuffer';
+      const fail = (wasOpen) => { if (this.ended) return; this.ended = true; clearTimeout(timer); onFail(wasOpen); };
+      const timer = setTimeout(() => { if (!this.open) { try { ws.close(); } catch (e) { /* gone */ } fail(false); } }, 5000);
+      ws.onopen = () => { this.open = true; clearTimeout(timer); for (const b of this.queue.splice(0)) ws.send(b); };
+      ws.onmessage = e => { if (typeof e.data === 'string' && this.onmessage) { try { this.onmessage({ data: JSON.parse(e.data) }); } catch (err) { /* bad message */ } } };
+      ws.onclose = () => fail(this.open);
+    }
+    send(head, pcm) {
+      let h = new TextEncoder().encode(JSON.stringify(head));
+      if (h.length % 2) h = new TextEncoder().encode(JSON.stringify(head) + ' ');
+      const n = pcm ? pcm.length : 0, buf = new ArrayBuffer(4 + h.length + n * 2);
+      new DataView(buf).setUint32(0, h.length, true);
+      new Uint8Array(buf, 4, h.length).set(h);
+      if (n) { const o = new Int16Array(buf, 4 + h.length, n); for (let i = 0; i < n; i++) { const v = pcm[i]; o[i] = v >= 1 ? 32767 : v <= -1 ? -32768 : v * 32767; } }
+      if (this.open) this.ws.send(buf); else this.queue.push(buf);
+    }
+    postMessage(m) {
+      if (m.type !== 'run') return; // the server has its own model
+      if (m.kind === 'verify' || m.seg < 0) { this.send({ t: 'full', kind: m.kind, seg: m.seg }, m.audio); return; }
+      const done = this.sent.get(m.seg) || 0;
+      if (m.audio.length > done) { this.send({ t: 'chunk', seg: m.seg }, m.audio.subarray(done)); this.sent.set(m.seg, m.audio.length); }
+      while (this.sent.size > 8) this.sent.delete(this.sent.keys().next().value);
+      this.send({ t: 'run', kind: m.kind, seg: m.seg, len: m.audio.length });
+    }
+    terminate() { this.ended = true; try { this.ws.close(); } catch (e) { /* gone */ } }
+  }
+  // Where the speech server is: ?asr=wss://… (remembered; ?asr=off to stop), else the site's own server when
+  // the page is served by one (it answers /health), else none (the model runs in the browser).
+  let asrServer = null;
+  const asrServerReady = (async () => {
+    try {
+      const q = new URLSearchParams(location.search).get('asr');
+      if (q) store.set('asrServer', q === 'off' ? '' : q);
+      const saved = store.get('asrServer', null);
+      if (saved !== null) { asrServer = saved || null; return; }
+      if (IN_CLAUDE) return;
+      const r = await fetch('health', { cache: 'no-store' });
+      if (r.ok && /json/.test(r.headers.get('content-type') || '')) asrServer = location.origin.replace(/^http/, 'ws') + location.pathname.replace(/[^/]*$/, '') + 'asr';
+    } catch (e) { /* no server here */ }
+  })();
+
   // ---- Sabaq's own speech recognition: the microphone is recorded here, cut into phrases where the
   // reciter pauses, and each phrase is transcribed by Tarteel's Quran Whisper model in a worker.
   // While a phrase is still being recited, it is transcribed every ~1.2 s for live tracking.
@@ -602,15 +741,27 @@
     worker: null, ready: false, failed: false, files: {}, stream: null, src: null, node: null, sink: null,
     on: false, seg: 0, inSpeech: false, buf: [], len: 0, pre: [], preLen: 0, run: 0, silence: 0,
     floor: 0.004, busy: false, finals: [], partial: null, lastPartial: 0, rs: null, frame: [], frameLen: 0, ms: [],
-    busyKind: '', costA: 1000, perSec: [], agree: { seg: -1, prev: [], done: 0 }, judgedSeg: 0, threads: 1, chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
+    busyKind: '', cutNow: false, costA: 1000, perSec: [], agree: { seg: -1, prev: [], done: 0, locked: [] }, judgedSeg: 0, threads: 1, chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
 
     loadPct() {
       let l = 0, t = 0;
       for (const k in this.files) { l += this.files[k].loaded; t += this.files[k].total; }
       return t ? Math.min(99, Math.round(l / t * 100)) : 0;
     },
-    init() {
+    init(local) {
       if (this.worker) return;
+      if (!local && asrServer) {
+        this.remote = true;
+        this.worker = new RemoteASR(asrServer, wasOpen => {
+          // the server went away (or never answered): carry on with the model in the browser
+          this.worker = null; this.remote = false; this.ready = false; this.busy = false; this.busyKind = '';
+          if (wasOpen) toast('Lost the speech server. Continuing with the model on this device.', 5000);
+          this.init(true); renderStatus();
+        });
+        this.worker.onmessage = e => this.onMessage(e.data);
+        return;
+      }
+      this.remote = false;
       this.worker = new Worker('asr-worker.js', { type: 'module' });
       this.worker.onmessage = e => this.onMessage(e.data);
       this.worker.onerror = () => { this.failed = true; toast('The speech model could not start in this browser.', 6000); this.stop(); };
@@ -647,6 +798,7 @@
       const a = audio(); // inside the tap: lets the qari play later (iPhone)
       if (!a) { toast('Audio is not available in this browser.', 4000); return; }
       setMic('starting');
+      await Promise.race([asrServerReady, new Promise(r => setTimeout(r, 1500))]);
       this.init();
       try {
         this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
@@ -776,7 +928,8 @@
       // A long phrase is cut sooner (the small model drops the last words of long phrases): after 7 s at a
       // short pause between words (160 ms, longer than the stops inside a word), after 14 s at a 100 ms
       // pause (never inside a fading word ending), and at 25 s regardless.
-      if ((this.len >= 16000 * this.chunkSecs() && this.silence >= 160) || (this.len >= 16000 * 14 && this.silence >= 100) || this.len >= 16000 * 25) {
+      if (this.cutNow || (this.len >= 16000 * this.chunkSecs() && this.silence >= 160) || (this.len >= 16000 * 14 && this.silence >= 100) || this.len >= 16000 * 25) {
+        this.cutNow = false;
         this.endSegment(); this.inSpeech = true; this.seg++; this.silence = 0; this.lastPartial = performance.now();
         // 12 s without a pause may be room noise, not recitation: let the floor learn the last 3 s
         let mn = Infinity; for (const v of this.recent) if (v < mn) mn = v; this.floor = Math.max(0.0008, mn);
@@ -814,26 +967,45 @@
     live(text, seg) {
       if (seg <= this.judgedSeg) return;
       const words = E.tokenize(text).slice(0, -1);
-      const A = this.agree.seg === seg ? this.agree : (this.agree = { seg, prev: [], done: 0 });
+      const A = this.agree.seg === seg ? this.agree : (this.agree = { seg, prev: [], done: 0, locked: [] });
       A.prev = words;
-      let n = A.done;
+      // Readings of the same phrase don't always start alike (one may add or drop a garbled first word), so
+      // where the locked-in words end is found by matching them, never by counting.
+      const start0 = alignAfter(words, A.locked);
+      const start = start0 >= 0 ? start0 : Math.min(A.locked.length, words.length); // (not found: by position)
+      let n = start;
       // (only words the tracker has confirmed: the last word or two still wait for what follows them, and
       // locking those in could lock in a garbled word before it is judged)
-      for (let j = words.length; j > n; j--) { const ok = cleanFeed(words.slice(A.done, j)); if (ok > 0) { n = A.done + ok; break; } }
-      if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, text: 'locked ' + A.done + '->' + n + ' of ' + words.length + ' | T.c=' + T.c + ' q=' + T.q.length + ' qi=' + T.qi }); // dev-only
-      if (n > A.done) { const fresh = words.slice(A.done, n); A.done = n; P = null; T.feed(fresh); handleEvents(); }
-      if (seg === this.seg && this.inSpeech && words.length > A.done) preview(words.slice(A.done).join(' '), true);
+      for (let j = words.length; j > n; j--) { const ok = cleanFeed(words.slice(start, j)); if (ok > 0) { n = start + ok; break; } }
+      if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, text: 'locked ' + start + '->' + n + ' of ' + words.length + ' | T.c=' + T.c + ' q=' + T.q.length + ' qi=' + T.qi }); // dev-only
+      if (n > start) {
+        const fresh = words.slice(start, n); A.locked.push(...fresh); A.done = A.locked.length; P = null; T.feed(fresh);
+        if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, text: '  fed [' + fresh.join(' ') + '] -> c=' + T.c + ' events ' + T.events.map(e => e.type + '@' + e.pos + (e.to != null ? '->' + e.to : '')).join(',') }); // dev-only
+        handleEvents();
+      }
+      // A mistake shown by a live reading (and confirmed by the words after it): don't wait for the reciter to
+      // pause; end the phrase now, so its final reading and double-check (and the stop) come at once. The
+      // double-check still decides: a garble in one reading never stops anyone.
+      if (T.strict && seg === this.seg && this.inSpeech && words.length > n) {
+        const stopAt = ws => { const C = T.clone(); C.feed(ws); const st = C.events.find(e => e.type === 'stop'); return st ? st.pos : -1; };
+        const rest = words.slice(n);
+        let at = stopAt(rest);
+        // (a word split in two right after the mistake, e.g. بمصابيح heard as "ذب مصابيح", hides it: allow one stray word)
+        for (let i = 1; i <= 2 && at < 0 && rest.length >= 3; i++) at = stopAt(rest.filter((_, k) => k !== i));
+        if (at >= 0 && A.cutFor !== at) { A.cutFor = at; this.cutNow = true; }
+        if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, text: '  suspect ' + (at >= 0 ? M.disp[at] : '-') + ' (before: ' + (A.suspect >= 0 ? M.disp[A.suspect] : '-') + ') rest=[' + rest.join(' ') + ']' + (this.cutNow ? ' CUT' : '') }); // dev-only
+        A.suspect = at;
+      }
+      if (seg === this.seg && this.inSpeech && words.length > n) preview(words.slice(n).join(' '), true);
       else { P = null; render(); }
     },
     // the words of a final reading that were not already locked in from live readings
     unlocked(text, seg) {
       const w = E.tokenize(text);
       const A = this.agree;
-      if (A.seg !== seg || !A.done) return w.join(' ');
-      const n = A.done, last = A.prev[n - 1];
-      let skip = Math.min(n, w.length);
-      for (const j of [n, n - 1, n + 1, n - 2, n + 2]) if (j >= 1 && j <= w.length && w[j - 1] === last) { skip = j; break; }
-      return w.slice(skip).join(' ');
+      if (A.seg !== seg || !A.locked.length) return w.join(' ');
+      const at = alignAfter(w, A.locked);
+      return w.slice(at >= 0 ? at : Math.min(A.locked.length, w.length)).join(' ');
     },
     // ms to read L seconds of audio on this device
     cost(L) { const b = this.perSec.length ? this.perSec.slice().sort((x, y) => x - y)[this.perSec.length >> 1] : 110; return this.costA + b * L; },
@@ -851,7 +1023,7 @@
     showSpeed() {
       const el = $('asrSpeed'); if (!el || !this.ms.length) return;
       const avg = this.ms.reduce((a, b) => a + b, 0) / this.ms.length;
-      el.textContent = 'Speech model on this device: ' + (avg / 1000).toFixed(1) + ' s per reading' + (this.threads > 1 ? ' (' + this.threads + ' threads)' : ' (1 thread)')
+      el.textContent = (this.remote ? 'Sabaq speech server: ' : 'Speech model on this device: ') + (avg / 1000).toFixed(1) + ' s per reading' + (this.remote ? '' : this.threads > 1 ? ' (' + this.threads + ' threads)' : ' (1 thread)')
         + (this.slowDevice() ? '; reading in ' + this.chunkSecs().toFixed(1) + ' s chunks to keep up' : '; live reading') + ' (7 s of recitation: ' + (this.cost(7) / 1000).toFixed(1) + ' s).';
     },
     // A phrase's words, in order. In teacher mode, a result that would stop the reciter is checked first:
@@ -866,7 +1038,16 @@
       if (!text.trim()) { commit('', true, true); return; }
       const stopsWith = t => { const C = T.clone(); const n0 = C.events.length; C.feed(E.tokenize(t)); C.flush(); return C.events.slice(n0).find(e => e.type === 'stop') || null; };
       const audioSeg = this.audioOf.get(seg);
-      if (!T.strict || !audioSeg || !stopsWith(text)) { commit(text, true, true); return; }
+      if (window.__asrLog) { const st0 = stopsWith(text); window.__asrLog.push({ kind: 'judge', seg, text: 'rest=[' + text + '] done=' + this.agree.done + ' prev=[' + this.agree.prev.join(' ') + '] T.c=' + (T.c >= 0 ? M.disp[T.c] : '-') + ' pendingQ=' + T.q.slice(T.qi).join(' ') + (st0 ? ' STOP@' + M.disp[st0.pos] + ' st=' + st0.state : '') }); } // dev-only
+      const st1 = T.strict && audioSeg ? stopsWith(text) : null;
+      if (!st1) { commit(text, true, true); return; }
+      // On the speech server, live readings come from a different (faster) model than this final reading: if one
+      // of them already flagged this very word, two independent models agree. Stop now, without a third reading.
+      if (this.remote && this.agree.seg === seg && this.agree.cutFor === st1.pos) {
+        commit(text, true, true);
+        if (!P) { clearTimeout(idleTimer); T.flush(); handleEvents(); render(); }
+        return;
+      }
       // the second reading also hears the end of the previous phrase: a different context makes the model
       // decode afresh (a garble caused by how the audio was cut, or by a fast join, is then not repeated)
       const prev = this.audioOf.get(seg - 1);
@@ -876,9 +1057,14 @@
       let altW = alt ? E.tokenize(alt) : [];
       if (prev && full.length) { const i = altW.indexOf(full[0]); if (i > 0 && i <= 6) altW = altW.slice(i); }
       const altRest = altW.length ? this.unlocked(altW.join(' '), seg) : '';
-      if (altRest.trim() && !stopsWith(altRest)) { commit(altRest, true, true); return; }
+      // Consensus of the two readings: wherever they differ, keep the word that fits the text. A mistake
+      // is then left only where both readings heard it (a real slip); a word garbled in one reading only
+      // (each reading tends to garble a different word) is not one.
+      const merged = altRest.trim() ? consensus(E.tokenize(text), E.tokenize(altRest)).join(' ') : text;
+      if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, text: 'consensus=[' + merged + ']' }); // dev-only
+      if (!stopsWith(merged)) { commit(merged, true, true); return; }
       // both readings show the mistake: stop now (the reciter has paused; no need to wait for more words)
-      commit(text, true, true);
+      commit(merged, true, true);
       if (!P) { clearTimeout(idleTimer); T.flush(); handleEvents(); render(); }
     },
     verify(audioSeg, before) {
@@ -911,7 +1097,7 @@
   if (IN_CLAUDE) setTimeout(() => { if (!Input.dict) showSiteNote(); }, 11000); // claude.use answers within 10 s
 
   // On the website, start downloading the speech model right away where it will be used (cached after once)
-  if (!IN_CLAUDE && (chooseKind() === 'model' || IS_IOS || IS_SAFARI)) setTimeout(() => ModelMic.init(), 1200); // (Safari: in case it is needed)
+  if (!IN_CLAUDE && chooseKind() === 'model') asrServerReady.then(() => setTimeout(() => ModelMic.init(), 300));
 
   // recogniser choice (type dialog)
   function syncRecSel() { const s = $('recSel'); if (s) s.value = store.get('recognizer2', 'auto'); }

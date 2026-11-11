@@ -17,18 +17,24 @@
     const buf = await packs[s], off = A.words[s][i * 2], len = A.words[s][i * 2 + 1];
     return ctx.decodeAudioData(buf.slice(off, off + len));
   }
+  let queueEnd = 0; // audio-clock time when everything scheduled so far has played
   window.__play = async items => {
     if (ctx.state !== 'running') await ctx.resume();
-    let t = ctx.currentTime + 0.05;
+    // Everything is timed on the audio clock (it can run slower than the wall clock in a background tab):
+    // a pause is then a real pause in what the microphone hears, never swallowed by audio still queued.
+    let t = Math.max(ctx.currentTime + 0.05, queueEnd);
     for (const it of items) {
       if (it.silence) { t += it.silence / 1000; continue; }
       const buf = it.url ? await decodeUrl(it.url) : await word(...it.word);
+      // (decoding can take seconds the first time: never schedule into the past, which would shorten a pause)
+      if (t < ctx.currentTime + 0.05) { const late = ctx.currentTime + 0.05 - t; t += late; }
       const src = ctx.createBufferSource(); src.buffer = buf; src.connect(dest);
       // { url, from, to } in ms plays just that part (e.g. exact words cut from a full-surah recitation)
       const from = (it.from || 0) / 1000, dur = it.to != null ? (it.to - (it.from || 0)) / 1000 : buf.duration - from;
       src.start(t, from, dur);
       t += dur + (it.gap || 0) / 1000;
     }
-    await new Promise(r => setTimeout(r, (t - ctx.currentTime) * 1000 + 50));
+    queueEnd = t;
+    while (ctx.currentTime < t) await new Promise(r => setTimeout(r, 20));
   };
 })();

@@ -278,7 +278,7 @@
       t.c = this.c; t.q = this.q.slice(); t.qi = this.qi; t.lost = this.lost.slice();
       t.events = []; t.stats = Object.assign({}, this.stats); t.sawBismillah = this.sawBismillah;
       t.strict = this.strict; t.stopped = this.stopped; t.fixed = new Set(this.fixed);
-      t.heardCount = this.heardCount; t.stopHeard = this.stopHeard; t.stopWord = this.stopWord; t.attempts = this.attempts; t.noRewindBefore = this.noRewindBefore;
+      t.heardCount = this.heardCount; t.stopHeard = this.stopHeard; t.stopWord = this.stopWord; t.attempts = this.attempts; t.noRewindBefore = this.noRewindBefore; t.letContinue = this.letContinue;
       return t;
     }
     setPosition(p) { this.c = p; this.lost = []; this.q = this.q.slice(this.qi); this.qi = 0; this.stopped = -1; this.noRewindBefore = 0; }
@@ -396,6 +396,32 @@
     _decide(r, final) {
       const m = this.m, q = this.q, c = this.c;
       const avail = q.length - r;
+      // Stopped here, the qari has already said the word, and the reciter carries on with the words that
+      // follow it (three in a row, after at most two stray words still on their way): let them. The word
+      // stays marked for review. A stop (even a false one, from a misheard word) can then never trap them.
+      if (this.strict && this.stopped === c && this.letContinue) {
+        const far = Math.min(m.N - 1, c + 30);
+        for (let j = 0; j <= 2 && r + j < q.length; j++) {
+          // a word said here that is (close to) the stopped word itself is the fix, not a stray word
+          if (m.matchPair(q, r + j, c).s >= NEAR) break;
+          let waiting = false;
+          for (let p = c + 1; p <= far; p++) {     // the nearest place the reciter has got to
+            const mm = m.matchPair(q, r + j, p);
+            if (mm.s < STRONG) continue;
+            const k = this._conf(r + j + mm.nr, p + mm.nt);
+            if (k >= 2) {
+              this.stopped = -1; this.attempts = 0; this.letContinue = false;
+              // words recited while stopped were not followed: "not clearly heard", never "skipped"
+              for (let x = c + 1; x < p; x++) if (this.state[x] === PENDING) this._mark(x, UNCLEAR);
+              this.events.push({ type: 'moveOn', pos: c, auto: true, continued: true });
+              this._accept(p, mm, r + j);
+              return true;
+            }
+            if (!final && r + j + mm.nr + 2 > q.length) waiting = true;
+          }
+          if (waiting) return 'wait'; // the next words are not heard yet
+        }
+      }
       const d = m.matchPair(q, r, c);
       const H = [];
       if (d.s >= NEAR) H.push({ t: 'near', k: this._conf(r + d.nr, c + d.nt), base: d.s + 0.2 });
@@ -452,6 +478,13 @@
           return true;
         }
         case 'sub': {
+          // Stopped here: only a word like this one (or the same mistake again) is a try at it. Anything else
+          // (the reciter carrying on regardless, a stray sound) neither counts as a try nor marks the word.
+          if (this.strict && c === this.stopped) {
+            const h = q[r], sw = this.stopWord;
+            const isTry = d.s >= 0.5 || (sw && (h === sw || sim(h, sw) >= 0.8));
+            if (!isTry) { this.qi = r + 1; return true; }
+          }
           this._mark(c, d.s >= NEAR ? CLOSE : WRONG, heardAt(r, 1));
           if (this.strict && (this.state[c] === WRONG || this.state[c] === CLOSE)) { if (this._stop(c, true)) return 'stop'; this.qi = r + 1; return true; }
           this.c = c + 1; this.qi = r + 1; this.lost.length = 0;
@@ -547,7 +580,7 @@
        they are let through (the word stays marked for review). */
     _stop(p, attempt) {
       const again = this.stopped === p;
-      if (!again) { this.attempts = 0; this.stopWord = this.heard.has(p) ? this.heard.get(p).replace(/ /g, '') : null; }
+      if (!again) { this.attempts = 0; this.letContinue = false; this.stopWord = this.heard.has(p) ? this.heard.get(p).replace(/ /g, '') : null; }
       if (attempt) this.attempts++;
       if (again && attempt && this.attempts >= 3) {
         this.stopped = -1; this.c = p + 1; this.lost.length = 0;

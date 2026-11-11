@@ -10,9 +10,11 @@ the microphone, and recite.
 
 **Two speech recognisers, picked automatically:**
 
-* **Chrome, Edge, Android:** the browser's own recognition (Google's), the same as on a computer.
-* **iPhone, Safari, Firefox:** **Sabaq's own Quran speech model.** iPhone browsers can only use Apple's speech
-  engine, which is unreliable for this (`service-not-allowed`, stops after every phrase). So Sabaq records the
+* **The browser's live recognition, wherever it exists:** Google's in Chrome, Edge and Android, Apple's in Safari
+  on iPhone and Mac. It streams each word back at once, so the highlight follows you instantly. **On iPhone it
+  only works while Siri is on** (Settings › Siri); otherwise iOS refuses it (`service-not-allowed`).
+* **Sabaq's own Quran speech model**, where there is no live recognition (Firefox) or it is refused (iPhone with
+  Siri off). The model takes over in the same tap, and the app says how to get live tracking. Sabaq records the
   microphone itself and runs Tarteel's open model trained on Quran recitation
   ([tarteel-ai/whisper-tiny-ar-quran](https://huggingface.co/tarteel-ai/whisper-tiny-ar-quran), Apache-2.0;
   ONNX build `Sharjeelbaig/whisper-tiny-ar-quran-onnx`) on the phone, in a background worker (`asr-worker.js`,

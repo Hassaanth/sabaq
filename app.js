@@ -388,7 +388,7 @@
   // 1) Claude dictation (when hosted on claude.ai)  2) the browser's own speech recognition  3) typing
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const Input = {
-    dict: null, rec: null, kind: 'none', state: 'idle', want: false, okOnce: false, lastError: null, restartTimer: 0, sim: null,
+    dict: null, rec: null, kind: 'none', srRefused: false, state: 'idle', want: false, okOnce: false, lastError: null, restartTimer: 0, sim: null,
     active() { return this.state !== 'idle'; },
   };
   let wakeLock = null;
@@ -441,15 +441,30 @@
   const IN_CLAUDE = !!(window.claude && typeof window.claude.use === 'function');
   const MODEL_OK = !IN_CLAUDE && !!(window.Worker && window.WebAssembly && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 
-  // Which recogniser to use. "auto": Chrome/Edge/Android use the browser's (Google) recognition, which
-  // works well there; iPhone, Safari and Firefox use Sabaq's own Quran model.
+  // Which recogniser to use. "auto": the browser's own live recognition wherever it exists (Google's in
+  // Chrome/Edge/Android, Apple's in Safari on iPhone and Mac): it streams each word back at once, which is
+  // what makes tracking instant. Sabaq's own Quran model where there is none (Firefox), or where it is
+  // refused (iPhone allows Apple's only while Siri is on): slower, but it works everywhere.
   function chooseKind() {
     if (Input.dict) return 'dictation';
-    const pref = store.get('recognizer', 'auto');
+    const pref = store.get('recognizer2', 'auto');
     if (pref === 'browser' && SR) return 'webspeech';
     if (pref === 'model' && MODEL_OK) return 'model';
-    if ((IS_IOS || IS_SAFARI || !SR) && MODEL_OK) return 'model';
-    return SR ? 'webspeech' : MODEL_OK ? 'model' : 'none';
+    if (SR && !Input.srRefused) return 'webspeech';
+    return MODEL_OK ? 'model' : SR ? 'webspeech' : 'none';
+  }
+  // The browser's live recognition was refused: carry on with Sabaq's own model, in the same tap.
+  function liveRefused(code, midway) {
+    Input.srRefused = true; Input.want = false;
+    if (!MODEL_OK) { toast('Speech recognition is not available here (' + code + ').', 6000); return false; }
+    Input.kind = 'model';
+    ModelMic.start();
+    toast(IS_IOS || IS_SAFARI
+      ? (midway ? 'Continuing with Sabaq\'s own speech model. ' : 'Using Sabaq\'s own speech model (a little slower). ')
+        + 'For instant tracking like on a computer, turn on Siri (Settings › Siri), then reload.'
+      : 'Using Sabaq\'s own speech model instead of the browser\'s (' + code + ').', 9000);
+    const n = $('srNote'); if (n) n.hidden = false;
+    return true;
   }
 
   function startListening() {
@@ -515,7 +530,7 @@
     rec.continuous = !IS_IOS;
     rec.interimResults = true;
     rec.maxAlternatives = 1;
-    rec.onstart = () => { Input.okOnce = true; setMic('listening'); };
+    rec.onstart = () => { if (Input.kind === 'webspeech') setMic('listening'); };
     rec.onresult = e => {
       Input.okOnce = true;
       const parts = [];
@@ -534,12 +549,9 @@
       if (code === 'service-not-allowed' || code === 'not-allowed' || code === 'language-not-supported') {
         Input.want = false;
         if (IN_CLAUDE) { showSiteNote(); toast('The microphone is blocked inside Claude. Use the Sabaq website (link at the top).', 7000); return; }
-        if (MODEL_OK && !(Input.okOnce && code !== 'language-not-supported')) {
-          // the browser's recogniser is refused here: use Sabaq's own model from now on
-          store.set('recognizer', 'model');
-          syncRecSel();
-          toast('Switched to Sabaq\'s own Quran speech model. Tap the mic again.', 5000);
-        } else if (Input.okOnce) {
+        // refused (iPhone: Siri is off; or a restart without a tap was refused): the model takes over now
+        if (code !== 'not-allowed' || !Input.okOnce) { if (liveRefused(code, Input.okOnce)) return; }
+        if (Input.okOnce) {
           toast('Listening paused. Tap the mic to go on.', 5000);
         } else {
           toast((code === 'not-allowed' ? 'Microphone access was blocked' : 'Speech recognition is not available here') + ' (' + code + ').', 6000);
@@ -555,6 +567,7 @@
     rec.onend = () => {
       Feed.settle();
       Feed.reset();
+      if (Input.kind === 'model') { Input.rec = null; return; }
       if (Input.want) {
         clearTimeout(Input.restartTimer);
         Input.restartTimer = setTimeout(restartWebSpeech, IS_IOS ? 150 : 0);
@@ -898,11 +911,11 @@
   if (IN_CLAUDE) setTimeout(() => { if (!Input.dict) showSiteNote(); }, 11000); // claude.use answers within 10 s
 
   // On the website, start downloading the speech model right away where it will be used (cached after once)
-  if (!IN_CLAUDE && chooseKind() === 'model') setTimeout(() => ModelMic.init(), 1200);
+  if (!IN_CLAUDE && (chooseKind() === 'model' || IS_IOS || IS_SAFARI)) setTimeout(() => ModelMic.init(), 1200); // (Safari: in case it is needed)
 
   // recogniser choice (type dialog)
-  function syncRecSel() { const s = $('recSel'); if (s) s.value = store.get('recognizer', 'auto'); }
-  $('recSel').addEventListener('change', e => { store.set('recognizer', e.target.value); toast('Speech recognition: ' + e.target.selectedOptions[0].textContent); });
+  function syncRecSel() { const s = $('recSel'); if (s) s.value = store.get('recognizer2', 'auto'); }
+  $('recSel').addEventListener('change', e => { store.set('recognizer2', e.target.value); toast('Speech recognition: ' + e.target.selectedOptions[0].textContent); });
   if (!MODEL_OK) $('recSel').querySelector('option[value="model"]').disabled = true;
   syncRecSel();
 

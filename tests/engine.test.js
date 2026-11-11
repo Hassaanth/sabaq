@@ -307,6 +307,26 @@ console.log('Recite from anywhere (auto-detect)');
   check('...and after the qari it follows them where they are (no new false stop)', t.stopped < 0 && t.c >= M.pos(67, 6) + 6 && !ev.some(e => e.type === 'stop'), { now: t.stopped, c: t.c - M.pos(67, 6), ev: ev.map(e => e.type) });
 }
 
+{
+  // the reciter's own examples: skipping the end of 67:2 into 67:3 (both start "الذي خلق"), a word, and a big jump
+  const run = (feedWords, strict) => { const t = new E.Tracker(M); t.strict = strict; t.setPosition(M.pos(67, 2)); const ev = []; for (const x of feedWords) { t.feed([x]); ev.push(...t.drainEvents()); } return { t, ev }; };
+  const a2 = words(67, 2, 2), a3 = words(67, 3, 3), a5 = words(67, 5, 5), wahuwa = M.pos(67, 2) + 8;
+  let r = run([...a2.slice(0, 8), ...a3.slice(0, 6)], true);
+  check('skipping into the next ayah (same opening words) stops at the first skipped word', r.t.stopped === wahuwa, { stopped: r.t.stopped - M.pos(67, 2) });
+  r = run([...a2.slice(0, 8), ...a3.slice(1, 6)], true);
+  check('...also when the next ayah is joined mid-way (خلق سبع سماوات)', r.t.stopped === wahuwa, { stopped: r.t.stopped - M.pos(67, 2) });
+  r = run([...a2, ...a5.slice(0, 7)], true);
+  check('a big jump ahead in the surah is a skip in teacher mode (not a silent move)', r.t.stopped === M.pos(67, 3) && !r.ev.some(e => e.type === 'relocated'), { stopped: r.t.stopped - M.pos(67, 3), ev: [...new Set(r.ev.map(e => e.type))] });
+  r = run([...a2, ...a5.slice(0, 7)], false);
+  let missed = 0; for (let p = M.pos(67, 3); p < M.pos(67, 5); p++) if (r.t.state[p] === MISSED) missed++;
+  check('...and without teacher mode the skipped ayahs are marked missed', missed === M.pos(67, 5) - M.pos(67, 3) && r.t.c > M.pos(67, 5), { missed, c: r.t.c - M.pos(67, 5) });
+  r = run([...a2.slice(0, 6), ...a2, ...a3.slice(0, 5)], true);
+  check('restarting the ayah is still not a skip', r.t.stopped < 0, { stopped: r.t.stopped });
+  const u = new E.Tracker(M); u.strict = true; u.setPosition(M.pos(67, 2));
+  for (const x of [...a2, ...words(18, 1, 1)]) u.feed([x]);
+  check('moving to another surah is still a deliberate move', u.stopped < 0 && M.sOf[u.c] === 17, { stopped: u.stopped, s: M.sOf[u.c] });
+}
+
 console.log('Continuity');
 {
   const t = recite(at(112, 1), [...words(112, 1, 4), 'بسم', 'الله', 'الرحمن', 'الرحيم', ...words(113, 1, 5)]);

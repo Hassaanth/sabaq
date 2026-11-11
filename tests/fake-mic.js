@@ -5,6 +5,7 @@
 //   await __play([{ word: [85, 17, 1] }, { word: [85, 1, 3] }])   // words from the bundled qari packs
 (function () {
   const ctx = new AudioContext();
+  window.__fakeCtx = ctx;
   const dest = ctx.createMediaStreamDestination();
   navigator.mediaDevices.getUserMedia = async () => { if (ctx.state !== 'running') await ctx.resume(); return dest.stream; };
   const cache = {};
@@ -32,6 +33,7 @@
       // { url, from, to } in ms plays just that part (e.g. exact words cut from a full-surah recitation)
       const from = (it.from || 0) / 1000, dur = it.to != null ? (it.to - (it.from || 0)) / 1000 : buf.duration - from;
       src.start(t, from, dur);
+      window.__played = window.__played || []; window.__played.push({ at: t, url: it.url, from: it.from || 0, to: it.to }); // (for lag measurements)
       t += dur + (it.gap || 0) / 1000;
     }
     queueEnd = t;

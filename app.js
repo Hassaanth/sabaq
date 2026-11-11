@@ -44,8 +44,17 @@
   // shown is held for a moment, so words don't flick back to grey and the highlight doesn't step back,
   // unless you really went back (a restart) or a word was judged.
   const hold = { c: -1, tc: -1, until: 0 };
+  // The tracker holds the newest word back until it hears the next one (to rule out a misheard word). For the
+  // display only, a held word that clearly is the next word of the text counts as reached: the highlight then
+  // keeps pace with the voice instead of trailing a word behind. Mistakes are still judged as before.
+  function heldAhead(view) {
+    if (view.c < 0 || T.stopped >= 0) return 0;
+    let k = 0;
+    while (view.qi + k < view.q.length && view.c + k < M.N && M.matchPair(view.q, view.qi + k, view.c + k).s >= 0.84) k++;
+    return k;
+  }
   function shownCursor(view) {
-    let c = view.c;
+    let c = view.c + heldAhead(view);
     const now = performance.now();
     if (c < hold.c && now < hold.until && T.c >= hold.tc && T.c <= hold.c && T.stopped < 0 && view.c >= 0) c = hold.c;
     else if (c !== hold.c) hold.until = now + 1200;
@@ -741,7 +750,7 @@
     worker: null, ready: false, failed: false, files: {}, stream: null, src: null, node: null, sink: null,
     on: false, seg: 0, inSpeech: false, buf: [], len: 0, pre: [], preLen: 0, run: 0, silence: 0,
     floor: 0.004, busy: false, finals: [], partial: null, lastPartial: 0, rs: null, frame: [], frameLen: 0, ms: [],
-    busyKind: '', cutNow: false, costA: 1000, perSec: [], agree: { seg: -1, prev: [], done: 0, locked: [] }, judgedSeg: 0, threads: 1, chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
+    busyKind: '', busyP: false, busyF: false, lanes: 1, pendingFinal: new Set(), cutNow: false, cutAt: 0, cutMid: new Set(), costA: 1000, perSec: [], agree: { seg: -1, prev: [], done: 0, locked: [] }, judgedSeg: 0, threads: 1, chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
 
     loadPct() {
       let l = 0, t = 0;
@@ -754,7 +763,7 @@
         this.remote = true;
         this.worker = new RemoteASR(asrServer, wasOpen => {
           // the server went away (or never answered): carry on with the model in the browser
-          this.worker = null; this.remote = false; this.ready = false; this.busy = false; this.busyKind = '';
+          this.worker = null; this.remote = false; this.ready = false; this.busy = false; this.busyKind = ''; this.busyP = this.busyF = false; this.pendingFinal.clear();
           if (wasOpen) toast('Lost the speech server. Continuing with the model on this device.', 5000);
           this.init(true); renderStatus();
         });
@@ -783,13 +792,14 @@
         if (m.total) this.files[m.file] = { loaded: m.loaded, total: m.total };
         if (this.on) renderStatus();
       } else if (m.type === 'ready') {
-        this.ready = true; this.threads = m.threads || 1; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
+        this.ready = true; this.threads = m.threads || 1; this.lanes = m.lanes || 1; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
       } else if (m.type === 'error') {
         this.failed = true;
         toast('Could not download the speech model. Check the connection and tap the mic again.', 6000);
         this.worker.terminate(); this.worker = null; this.stop();
       } else if (m.type === 'result') {
-        this.busy = false; this.busyKind = '';
+        if (this.twoLanes()) { if (m.kind === 'partial') this.busyP = false; else { this.busyF = false; this.busyKind = ''; } this.busy = this.busyP || this.busyF; }
+        else { this.busy = false; this.busyKind = ''; }
         if (m.ms) {
           this.ms.push(m.ms); if (this.ms.length > 8) this.ms.shift();
           // cost of a reading ~ a (fixed: the model always hears 30 s) + b per second of audio (writing it out)
@@ -798,7 +808,13 @@
         if (window.__asrLog) window.__asrLog.push({ kind: m.kind, seg: m.seg, ms: m.ms, secs: m.secs, at: performance.now(), text: m.text }); // dev-only test log
         if (m.kind === 'final') this.chain = this.chain.then(() => this.judge(m.text, m.seg)).catch(() => {});
         else if (m.kind === 'verify') { const f = this.verifyWait; this.verifyWait = null; if (f) f(m.text); }
-        else this.chain = this.chain.then(() => this.live(m.text, m.seg)).catch(() => {});
+        else {
+          const whole = this.partialWhole;
+          // (two lanes: the earlier phrase may not be judged yet; its words come first, so this one only moves
+          // the highlight for now, at once, and locks nothing in)
+          if ([...this.pendingFinal].some(x => x < m.seg)) this.peek(m.text, m.seg, whole);
+          else this.chain = this.chain.then(() => this.live(m.text, m.seg, whole)).catch(() => {});
+        }
         this.showSpeed();
         this.pump();
         if (!this.on && !this.busy && !this.finals.length) settle();
@@ -925,7 +941,7 @@
         while (this.preLen > 16000 * 0.35) this.preLen -= this.pre.shift().length;
         this.run = voiced ? this.run + 1 : 0;
         if (this.run >= 3) {
-          this.inSpeech = true; this.seg++; this.silence = 0; this.voicedN = this.run;
+          this.inSpeech = true; this.seg++; this.silence = 0; this.voicedN = this.run; this.lastPartialLen = 0;
           this.buf = this.pre; this.len = this.preLen; this.pre = []; this.preLen = 0;
           this.lastPartial = performance.now();
         }
@@ -938,18 +954,26 @@
       // A long phrase is cut sooner (the small model drops the last words of long phrases): after 7 s at a
       // short pause between words (160 ms, longer than the stops inside a word), after 14 s at a 100 ms
       // pause (never inside a fading word ending), and at 25 s regardless.
-      if (this.cutNow || (this.len >= 16000 * this.chunkSecs() && this.silence >= 160) || (this.len >= 16000 * 14 && this.silence >= 100) || this.len >= 16000 * 25) {
+      // (an early cut waits for the next short gap between words: cutting inside a word garbles it, and both
+      // readings would then hear the same garble; after 1.5 s it cuts anyway and the word at the cut is not judged)
+      const cutGap = this.cutNow && this.silence >= 80, cutLate = this.cutNow && performance.now() - this.cutAt > 1500;
+      if (cutGap || cutLate || (this.len >= 16000 * this.chunkSecs() && this.silence >= 160) || (this.len >= 16000 * 14 && this.silence >= 100) || this.len >= 16000 * 25) {
+        if (cutLate && !cutGap) this.cutMid.add(this.seg);
         this.cutNow = false;
-        this.endSegment(); this.inSpeech = true; this.seg++; this.silence = 0; this.lastPartial = performance.now();
+        this.endSegment(); this.inSpeech = true; this.seg++; this.silence = 0; this.lastPartial = performance.now(); this.lastPartialLen = 0;
         // 12 s without a pause may be room noise, not recitation: let the floor learn the last 3 s
         let mn = Infinity; for (const v of this.recent) if (v < mn) mn = v; this.floor = Math.max(0.0008, mn);
         return;
       }
       // live reading of the phrase so far, whenever the model is free (on a slow phone that is back to back);
-      // not in a pause that may be the end of the phrase, so the final reading never waits behind one
-      if (!this.busy && !this.finals.length && !this.slowDevice() && this.silence < 200 && performance.now() - this.lastPartial > 500 && this.len > 16000 * 1.2) {
-        this.lastPartial = performance.now();
-        this.partial = { kind: 'partial', seg: this.seg, audio: this.join() };
+      // not in a long pause that may be the end of the phrase, so the final reading never waits behind one.
+      // The best moment is the short pause between two words (the last word is then complete): read there too.
+      const due = this.silence < 200 && performance.now() - this.lastPartial > (this.remote ? 200 : 500);
+      const gap = this.silence >= 100 && this.silence < 300;
+      if ((this.twoLanes() ? !this.busyP : (!this.busy && !this.finals.length)) && !this.slowDevice() && (due || gap) && this.len > (this.lastPartialLen || 0) + 3200 && this.len > 16000 * (this.remote ? 0.6 : 1.2)) {
+        this.lastPartial = performance.now(); this.lastPartialLen = this.len;
+        // (if the audio so far ends in a short pause, its last word is complete: the reading keeps it)
+        this.partial = { kind: 'partial', seg: this.seg, audio: this.join(), whole: this.silence >= 100 };
         this.pump();
       }
     },
@@ -966,6 +990,7 @@
       // a click, a cough or a door is not a phrase: at least 0.2 s of clear sound
       if (audioSeg.length > 16000 * 0.25 && voicedN >= 10) {
         this.audioOf.set(this.seg, audioSeg); if (this.audioOf.size > 6) this.audioOf.delete(this.audioOf.keys().next().value);
+        this.pendingFinal.add(this.seg);
         this.finals.push({ kind: 'final', seg: this.seg, audio: audioSeg.slice() }); this.pump();
       }
     },
@@ -974,9 +999,9 @@
     // for good) at once: nothing to judge, so no risk of a false mistake. Anything that looks wrong waits for
     // the phrase's final reading and its double-check (two live readings of the same audio often share a
     // garbled word, so their agreeing proves nothing). The rest is shown as a preview.
-    live(text, seg) {
+    live(text, seg, whole) {
       if (seg <= this.judgedSeg) return;
-      const words = E.tokenize(text).slice(0, -1);
+      const all = E.tokenize(text), words = whole ? all : all.slice(0, -1);
       const A = this.agree.seg === seg ? this.agree : (this.agree = { seg, prev: [], done: 0, locked: [] });
       A.prev = words;
       // Readings of the same phrase don't always start alike (one may add or drop a garbled first word), so
@@ -1002,12 +1027,18 @@
         let at = stopAt(rest);
         // (a word split in two right after the mistake, e.g. بمصابيح heard as "ذب مصابيح", hides it: allow one stray word)
         for (let i = 1; i <= 2 && at < 0 && rest.length >= 3; i++) at = stopAt(rest.filter((_, k) => k !== i));
-        if (at >= 0 && A.cutFor !== at) { A.cutFor = at; this.cutNow = true; }
+        if (at >= 0 && A.cutFor !== at) { A.cutFor = at; this.cutNow = true; this.cutAt = performance.now(); }
         if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, text: '  suspect ' + (at >= 0 ? M.disp[at] : '-') + ' (before: ' + (A.suspect >= 0 ? M.disp[A.suspect] : '-') + ') rest=[' + rest.join(' ') + ']' + (this.cutNow ? ' CUT' : '') }); // dev-only
         A.suspect = at;
       }
       if (seg === this.seg && this.inSpeech && words.length > n) preview(words.slice(n).join(' '), true);
       else { P = null; render(); }
+    },
+    // A live reading shown without locking anything in (an earlier phrase is still being judged)
+    peek(text, seg, whole) {
+      if (seg !== this.seg || !this.inSpeech) return;
+      const all = E.tokenize(text), words = whole ? all : all.slice(0, -1);
+      if (words.length) preview(words.join(' '), true);
     },
     // the words of a final reading that were not already locked in from live readings
     unlocked(text, seg) {
@@ -1042,6 +1073,9 @@
     // Only when both readings show the mistake does Sabaq stop.
     async judge(text, seg) {
       this.judgedSeg = Math.max(this.judgedSeg, seg);
+      this.pendingFinal.delete(seg);
+      const midCut = this.cutMid.delete(seg);
+      if (midCut) text = E.tokenize(text).slice(0, -1).join(' ');
       const full = E.tokenize(text);
       text = this.unlocked(text, seg);
       // (nothing new: still arm the end-of-phrase check, which judges a slip on the ayah's last word)
@@ -1065,6 +1099,7 @@
       if (window.__asrLog) window.__asrLog.push({ kind: 'verify', seg, text: alt, at: performance.now() }); // dev-only test log
       // drop the words of that context: the second reading starts where this phrase's first word is found
       let altW = alt ? E.tokenize(alt) : [];
+      if (midCut) altW = altW.slice(0, -1);
       if (prev && full.length) { const i = altW.indexOf(full[0]); if (i > 0 && i <= 6) altW = altW.slice(i); }
       const altRest = altW.length ? this.unlocked(altW.join(' '), seg) : '';
       // Consensus of the two readings: wherever they differ, keep the word that fits the text. A mistake
@@ -1090,10 +1125,25 @@
         this.pump();
       });
     },
+    twoLanes() { return !!(this.remote && this.lanes >= 2); },
     pump() {
-      if (this.busy || !this.ready || !this.worker) return;
+      if (!this.ready || !this.worker) return;
+      if (this.twoLanes()) {
+        // the server reads a final reading and a live reading side by side
+        if (!this.busyF && this.finals.length) {
+          const job = this.finals.shift(); this.busyF = true; this.busyKind = job.kind; renderStatus();
+          this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio });
+        }
+        if (!this.busyP && this.partial) {
+          const job = this.partial; this.partial = null; this.partialWhole = !!job.whole; this.busyP = true;
+          this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio });
+        }
+        this.busy = this.busyF || this.busyP;
+        return;
+      }
+      if (this.busy) return;
       const job = this.finals.shift() || this.partial;
-      if (job === this.partial) this.partial = null;
+      if (job === this.partial) { this.partial = null; this.partialWhole = !!job.whole; }
       if (!job) return;
       this.busy = true; this.busyKind = job.kind;
       if (job.kind !== 'partial') renderStatus();

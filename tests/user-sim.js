@@ -71,5 +71,25 @@
     clearInterval(rec); rec = null;
     return { tally: ['nOk', 'nCheck', 'nMiss'].map(id => document.getElementById(id).textContent).join('/'), marks: marks(), timeline: log.slice() };
   }
-  window.__sim = { run, report, startRecording, surah };
+  // Highlight lag: recite ayahs straight through and measure, for every word, how long after it was said
+  // (end of the word in the audio) the highlight moved past it. Timed on the audio clock.
+  async function lag(s, a1, a2) {
+    const t = await surah(s), ctx = window.__fakeCtx, passed = new Map();
+    // (a DOM observer fires the moment the highlight moves; timers are throttled in a background tab)
+    const seen = () => { const c = document.querySelector('.w.cur'); const p = c ? +c.dataset.p : -1; for (let q = p - 1; q >= 0 && !passed.has(q); q--) passed.set(q, ctx.currentTime); };
+    const mo = new MutationObserver(seen); mo.observe(document.getElementById('quran'), { subtree: true, attributes: true, attributeFilter: ['class'] });
+    const watch = Promise.resolve(); let on = true;
+    const first = t.ayahs[a1][0][0], last = t.ayahs[a2][t.ayahs[a2].length - 1][1];
+    window.__played = [];
+    await __play([{ url: t.url, from: first, to: last }, { silence: 6000 }]);
+    on = false; await watch; mo.disconnect();
+    const start = window.__played[0].at, base = M_pos(s, a1), lags = [];
+    let i = 0;
+    for (let a = a1; a <= a2; a++) for (const [, end] of t.ayahs[a]) { const p = base + i++; const said = start + (end - first) / 1000; lags.push(passed.has(p) ? passed.get(p) - said : null); }
+    const ok = lags.filter(x => x != null).sort((x, y) => x - y), q = f => ok.length ? ok[Math.min(ok.length - 1, Math.floor(f * ok.length))].toFixed(1) + 's' : '-';
+    return { words: lags.length, followed: ok.length, median: q(0.5), p90: q(0.9), max: q(0.999), lags: lags.map(x => x == null ? 'x' : x.toFixed(1)).join(' ') };
+  }
+  // position of a word in the whole Quran (first word of ayah a of surah s), from the page's own data
+  function M_pos(s, a) { let p = 0; const Q = window.QURAN; for (let k = 0; k < s - 1; k++) for (const ay of Q[k].a) p += ay[0].split(' ').length; for (let k = 0; k < a - 1; k++) p += Q[s - 1].a[k][0].split(' ').length; return p; }
+  window.__sim = { run, report, startRecording, surah, lag };
 })();

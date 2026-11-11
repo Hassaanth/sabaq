@@ -36,10 +36,14 @@ async function read(p, audio, extra) {
 // model files are cached outside the app folder (HF_CACHE to choose; a sandboxed folder can hide files from the runtime)
 env.cacheDir = process.env.HF_CACHE || path.join(os.tmpdir(), 'sabaq-hf-cache');
 
-// ---- the models (phrases are read one at a time: final readings first, then live ones)
+// ---- the models. One lane by default: final readings first, then live ones. LANES=2 reads a live reading and
+// a final reading side by side; it only helps with plenty of CPU cores or a GPU (measured on a 6-core PC: the
+// two models slowed each other down, highlight lag 1.8 s instead of 1.5 s).
 let asr = null, asrLive = null, warm = 0;
 const t0 = Date.now();
-const opts = { dtype: 'q8', session_options: { intraOpNumThreads: +process.env.THREADS || 4 } };
+const CORES = os.cpus().length;
+const LANES = +process.env.LANES || 1;
+const opts = { dtype: 'q8', session_options: { intraOpNumThreads: +process.env.THREADS || Math.max(1, Math.min(4, Math.floor(CORES / LANES))) } };
 async function ready(name) {
   const p = await pipeline('automatic-speech-recognition', name, opts);
   await read(p, new Float32Array(16000), {});           // warm up
@@ -49,23 +53,30 @@ const loading = (async () => {
   asr = await ready(MODEL);
   asrLive = LIVE_MODEL === MODEL ? asr : await ready(LIVE_MODEL);
   const t = Date.now(); await read(asrLive, new Float32Array(16000), { max_new_tokens: 8 }); warm = Date.now() - t;
-  console.log(`models ready in ${((Date.now() - t0) / 1000).toFixed(1)} s (final: ${MODEL}; live: ${LIVE_MODEL}; a live reading costs ~${warm} ms + text)`);
+  console.log(`${LANES} lane(s), ${opts.session_options.intraOpNumThreads} threads each; models ready in ${((Date.now() - t0) / 1000).toFixed(1)} s (final: ${MODEL}; live: ${LIVE_MODEL}; a live reading costs ~${warm} ms + text)`);
 })();
 
 const queue = [];
-let running = false;
-async function pump() {
-  if (running || !asr || !asrLive) return;
-  const i = queue.findIndex(j => j.kind !== 'partial');
-  const job = queue.splice(i >= 0 ? i : 0, 1)[0]; if (!job) return;
-  running = true;
+const busy = { live: false, final: false, one: false };
+function pump() {
+  if (!asr || !asrLive) return;
+  const take = live => { const i = queue.findIndex(j => (j.kind === 'partial') === live); return i < 0 ? null : queue.splice(i, 1)[0]; };
+  if (LANES >= 2) {
+    if (!busy.final) { const j = take(false); if (j) run(j, 'final'); }
+    if (!busy.live) { const j = take(true); if (j) run(j, 'live'); }
+  } else if (!busy.one) {
+    const j = take(false) || take(true); if (j) run(j, 'one');
+  }
+}
+async function run(job, lane) {
+  busy[lane] = true;
   const t = Date.now();
   let text = '', error;
   try {
     const r = await read(job.kind === 'partial' ? asrLive : asr, job.audio, { max_new_tokens: Math.min(440, Math.ceil(job.audio.length / 16000 * 20) + 16) });
     text = (r && r.text) || '';
   } catch (e) { error = String((e && e.message) || e); }
-  running = false;
+  busy[lane] = false;
   if (job.ws.readyState === 1) job.ws.send(JSON.stringify({ type: 'result', id: job.id, kind: job.kind, seg: job.seg, text, error, ms: Date.now() - t, secs: job.audio.length / 16000 }));
   pump();
 }
@@ -91,7 +102,7 @@ const toFloat = (pcm) => { const s = new Int16Array(pcm.buffer, pcm.byteOffset, 
 const wss = new WebSocketServer({ server, path: '/asr', maxPayload: 16000 * 2 * 32 + 4096 });
 wss.on('connection', ws => {
   const segs = new Map(); // seg -> { parts: Float32Array[], len }
-  const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true }));
+  const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true, lanes: LANES }));
   if (asr && asrLive) hello(); else loading.then(hello);
   ws.on('message', (data, isBinary) => {
     if (!isBinary) return;

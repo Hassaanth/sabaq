@@ -1,0 +1,70 @@
+# Deploys Sabaq's speech server (and the site with it) to a free Hugging Face Docker Space: a permanent
+# address that works when no computer of yours is on. Needs one repository secret, HF_TOKEN: a Hugging Face
+# access token with "write" permission. The Space (<your-username>/sabaq) is created on the first run.
+name: Deploy speech server to Hugging Face
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the token
+        id: hf
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then echo "No HF_TOKEN secret yet: nothing to deploy."; echo "skip=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          user=$(curl -sf -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/api/whoami-v2 | python3 -c 'import sys,json; print(json.load(sys.stdin)["name"])')
+          echo "user=$user" >> "$GITHUB_OUTPUT"
+          host=$(echo "$user-sabaq" | tr '[:upper:]_.' '[:lower:]--')
+          echo "Space: https://huggingface.co/spaces/$user/sabaq  (app: https://$host.hf.space)"
+
+      - name: Create the Space (first time only)
+        if: steps.hf.outputs.skip != '1'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          code=$(curl -s -o /tmp/create.json -w '%{http_code}' -X POST https://huggingface.co/api/repos/create \
+            -H "Authorization: Bearer $HF_TOKEN" -H 'Content-Type: application/json' \
+            -d '{"type":"space","name":"sabaq","sdk":"docker","private":false}')
+          echo "create: $code"; cat /tmp/create.json; echo
+          [ "$code" = "200" ] || [ "$code" = "409" ]
+
+      - name: Assemble and push the Space
+        if: steps.hf.outputs.skip != '1'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_USER: ${{ steps.hf.outputs.user }}
+        run: |
+          mkdir -p /tmp/space/server
+          cp index.html app.js engine.js quran-data.js asr-worker.js coi-sw.js /tmp/space/
+          cp server/asr-server.js server/package.json server/package-lock.json /tmp/space/server/
+          cp server/Dockerfile /tmp/space/Dockerfile
+          cat > /tmp/space/README.md <<'EOF'
+          ---
+          title: Sabaq
+          emoji: 📖
+          colorFrom: green
+          colorTo: blue
+          sdk: docker
+          app_port: 7860
+          pinned: false
+          license: apache-2.0
+          short_description: Quran recitation tracker with server speech recognition
+          ---
+
+          Sabaq's speech server and website. Source: https://github.com/${{ github.repository }}
+          EOF
+          sed -i 's/^          //' /tmp/space/README.md
+          cd /tmp/space
+          git init -q -b main
+          git config user.name "Sabaq deploy"; git config user.email "deploy@users.noreply.github.com"
+          git add -A && git commit -qm "Deploy ${{ github.sha }}"
+          git push -q --force "https://$HF_USER:$HF_TOKEN@huggingface.co/spaces/$HF_USER/sabaq" main
+          echo "Pushed. The Space builds for a few minutes, then runs at https://$(echo "$HF_USER-sabaq" | tr '[:upper:]_.' '[:lower:]--').hf.space"

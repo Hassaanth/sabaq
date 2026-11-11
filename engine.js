@@ -608,6 +608,24 @@
       if (!res) return false;
       if (res.ambiguous && this.lost.length < 10) return false;
       const wasLocked = this.c >= 0;
+      // A jump forward within the surah you are reciting is a skip, however far (memorization: every word
+      // counts). Teacher mode stops you at the first skipped word; otherwise the skipped words are marked
+      // and tracking follows you. Going back (review) or to another surah is a deliberate move. Once the
+      // qari has said the stopped word, carrying on from further ahead is allowed (as in _decide).
+      const target = anchor0(res);
+      const skipping = wasLocked && target > this.c && this.m.sOf[target] === this.m.sOf[this.c];
+      if (skipping && this.strict && !(this.stopped >= 0 && this.letContinue)) {
+        if (this.stopped !== this.c) this._mark(this.c, MISSED);
+        this.lost.length = 0;
+        this._stop(this.c, false);
+        return true;
+      }
+      if (this.stopped >= 0) {
+        // relocating while stopped (the reciter carried on elsewhere): the stop is over; the word stays marked
+        this.events.push({ type: 'moveOn', pos: this.stopped, auto: true, continued: true });
+        this.stopped = -1; this.attempts = 0; this.letContinue = false;
+      }
+      if (skipping && !this.strict) for (let p = this.c; p < target; p++) if (this.state[p] === PENDING) this._mark(p, MISSED);
       // Found it. Re-read the located words with the normal rules from the first clearly heard word, so
       // a mistake in the phrase that was used to find the place (often the very first ayah) still counts.
       // Each word is re-read at most once (no loops).
@@ -647,6 +665,10 @@
       this.lost = this.lost.map(i => i - drop).filter(i => i >= 0);
       this.noRewindBefore = Math.max(0, this.noRewindBefore - drop);
     }
+  }
+  function anchor0(res) {
+    const a = res.pairs.find(x => x[2] >= STRONG && (x[3] || 1) === 1 && (x[4] || 1) === 1);
+    return a ? a[1] : res.pairs[0][1];
   }
   Tracker.__Shell = function () {};
   Tracker.__Shell.prototype = Tracker.prototype;

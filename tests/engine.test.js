@@ -242,6 +242,15 @@ console.log('Recite from anywhere (auto-detect)');
   check('...and a real slip right after them still stops you', t2.stopped === hal + 3, { stopped: t2.stopped - hal });
 }
 
+{
+  // joined words that also score as a near merge (البصاكرتين for البصر كرتين) are not a mistake either
+  const w = [...words(67, 3, 3), 'ثم', 'ارجع', 'البصاكرتين', ...words(67, 4, 4).slice(4), ...words(67, 5, 5)];
+  const t = new E.Tracker(M); t.strict = true;
+  for (const x of w) t.feed([x]); t.flush();
+  const b = M.pos(67, 4) + 2;
+  check('joined words scored as a near merge do not stop you', t.stopped < 0 && t.state[b] === UNCLEAR && t.state[b + 1] === CORRECT, { stopped: t.stopped, st: [t.state[b], t.state[b + 1]] });
+}
+
 console.log('Continuity');
 {
   const t = recite(at(112, 1), [...words(112, 1, 4), 'بسم', 'الله', 'الرحمن', 'الرحيم', ...words(113, 1, 5)]);

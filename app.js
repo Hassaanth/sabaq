@@ -373,6 +373,16 @@
     render();
   }
   function settle() { P = null; T.flush(); handleEvents(); render(); }
+  // How many of these words can be locked in: feeding them changes nothing but marking words right (no
+  // mistake, no stop, nothing unclear), counting only the words the tracker has already confirmed.
+  function cleanFeed(words) {
+    const C = T.clone();
+    C.feed(words);
+    if (C.events.some(e => e.type === 'stop' || e.type === 'mistake' || e.type === 'relocated')) return 0;
+    const a = T.state, b = C.state;
+    for (let p = 0; p < b.length; p++) if (b[p] !== a[p] && b[p] !== CORRECT) return 0;
+    return Math.max(0, words.length - (C.q.length - C.qi));
+  }
 
   // ---------------------------------------------------------------- speech input
   // 1) Claude dictation (when hosted on claude.ai)  2) the browser's own speech recognition  3) typing
@@ -579,7 +589,7 @@
     worker: null, ready: false, failed: false, files: {}, stream: null, src: null, node: null, sink: null,
     on: false, seg: 0, inSpeech: false, buf: [], len: 0, pre: [], preLen: 0, run: 0, silence: 0,
     floor: 0.004, busy: false, finals: [], partial: null, lastPartial: 0, rs: null, frame: [], frameLen: 0, ms: [],
-    busyKind: '', chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
+    busyKind: '', costA: 1000, perSec: [], agree: { seg: -1, prev: [], done: 0 }, judgedSeg: 0, threads: 1, chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
 
     loadPct() {
       let l = 0, t = 0;
@@ -591,26 +601,31 @@
       this.worker = new Worker('asr-worker.js', { type: 'module' });
       this.worker.onmessage = e => this.onMessage(e.data);
       this.worker.onerror = () => { this.failed = true; toast('The speech model could not start in this browser.', 6000); this.stop(); };
-      this.worker.postMessage({ type: 'load' });
+      const slowX = +(new URLSearchParams(location.search).get('asrslow') || 0);
+      this.worker.postMessage({ type: 'load', slow: slowX > 1 ? slowX : 0 });
     },
     onMessage(m) {
       if (m.type === 'progress') {
         if (m.total) this.files[m.file] = { loaded: m.loaded, total: m.total };
         if (this.on) renderStatus();
       } else if (m.type === 'ready') {
-        this.ready = true; renderStatus(); this.pump();
+        this.ready = true; this.threads = m.threads || 1; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
       } else if (m.type === 'error') {
         this.failed = true;
         toast('Could not download the speech model. Check the connection and tap the mic again.', 6000);
         this.worker.terminate(); this.worker = null; this.stop();
       } else if (m.type === 'result') {
         this.busy = false; this.busyKind = '';
-        if (m.ms) { this.ms.push(m.ms); if (this.ms.length > 8) this.ms.shift(); }
+        if (m.ms) {
+          this.ms.push(m.ms); if (this.ms.length > 8) this.ms.shift();
+          // cost of a reading ~ a (fixed: the model always hears 30 s) + b per second of audio (writing it out)
+          if (m.secs > 1.5) { this.perSec.push(Math.max(0, (m.ms - this.costA) / m.secs)); if (this.perSec.length > 6) this.perSec.shift(); }
+        }
         if (window.__asrLog) window.__asrLog.push({ kind: m.kind, seg: m.seg, ms: m.ms, secs: m.secs, at: performance.now(), text: m.text }); // dev-only test log
         if (m.kind === 'final') this.chain = this.chain.then(() => this.judge(m.text, m.seg)).catch(() => {});
         else if (m.kind === 'verify') { const f = this.verifyWait; this.verifyWait = null; if (f) f(m.text); }
-        // a live transcription is cut wherever the audio was, often mid-word: its last word is left for the final one
-        else if (m.seg === this.seg && this.inSpeech) preview(m.text.trim().split(/\s+/).slice(0, -1).join(' '), true);
+        else this.chain = this.chain.then(() => this.live(m.text, m.seg)).catch(() => {});
+        this.showSpeed();
         this.pump();
         if (!this.on && !this.busy && !this.finals.length) settle();
       }
@@ -748,16 +763,15 @@
       // A long phrase is cut sooner (the small model drops the last words of long phrases): after 7 s at a
       // short pause between words (160 ms, longer than the stops inside a word), after 14 s at a 100 ms
       // pause (never inside a fading word ending), and at 25 s regardless.
-      if ((this.len >= 16000 * 7 && this.silence >= 160) || (this.len >= 16000 * 14 && this.silence >= 100) || this.len >= 16000 * 25) {
+      if ((this.len >= 16000 * this.chunkSecs() && this.silence >= 160) || (this.len >= 16000 * 14 && this.silence >= 100) || this.len >= 16000 * 25) {
         this.endSegment(); this.inSpeech = true; this.seg++; this.silence = 0; this.lastPartial = performance.now();
         // 12 s without a pause may be room noise, not recitation: let the floor learn the last 3 s
         let mn = Infinity; for (const v of this.recent) if (v < mn) mn = v; this.floor = Math.max(0.0008, mn);
         return;
       }
-      // live transcription of the phrase so far (skipped when the device is too slow for it)
-      // (each run takes about 2 s in a phone browser, whatever the length; skipped on slower devices)
-      const slow = this.ms.length >= 3 && this.ms.reduce((s, v) => s + v, 0) / this.ms.length > 3500;
-      if (!this.busy && !slow && performance.now() - this.lastPartial > 1200 && this.len > 16000 * 1.5) {
+      // live reading of the phrase so far, whenever the model is free (on a slow phone that is back to back);
+      // not in a pause that may be the end of the phrase, so the final reading never waits behind one
+      if (!this.busy && !this.finals.length && !this.slowDevice() && this.silence < 200 && performance.now() - this.lastPartial > 500 && this.len > 16000 * 1.2) {
         this.lastPartial = performance.now();
         this.partial = { kind: 'partial', seg: this.seg, audio: this.join() };
         this.pump();
@@ -779,26 +793,87 @@
         this.finals.push({ kind: 'final', seg: this.seg, audio: audioSeg.slice() }); this.pump();
       }
     },
+    // A live reading of the phrase so far (re-read every moment while the reciter is speaking). Its last word
+    // is dropped (the audio may end mid-word). Words that are simply the right words are locked in (tracked
+    // for good) at once: nothing to judge, so no risk of a false mistake. Anything that looks wrong waits for
+    // the phrase's final reading and its double-check (two live readings of the same audio often share a
+    // garbled word, so their agreeing proves nothing). The rest is shown as a preview.
+    live(text, seg) {
+      if (seg <= this.judgedSeg) return;
+      const words = E.tokenize(text).slice(0, -1);
+      const A = this.agree.seg === seg ? this.agree : (this.agree = { seg, prev: [], done: 0 });
+      A.prev = words;
+      let n = A.done;
+      // (only words the tracker has confirmed: the last word or two still wait for what follows them, and
+      // locking those in could lock in a garbled word before it is judged)
+      for (let j = words.length; j > n; j--) { const ok = cleanFeed(words.slice(A.done, j)); if (ok > 0) { n = A.done + ok; break; } }
+      if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, text: 'locked ' + A.done + '->' + n + ' of ' + words.length + ' | T.c=' + T.c + ' q=' + T.q.length + ' qi=' + T.qi }); // dev-only
+      if (n > A.done) { const fresh = words.slice(A.done, n); A.done = n; P = null; T.feed(fresh); handleEvents(); }
+      if (seg === this.seg && this.inSpeech && words.length > A.done) preview(words.slice(A.done).join(' '), true);
+      else { P = null; render(); }
+    },
+    // the words of a final reading that were not already locked in from live readings
+    unlocked(text, seg) {
+      const w = E.tokenize(text);
+      const A = this.agree;
+      if (A.seg !== seg || !A.done) return w.join(' ');
+      const n = A.done, last = A.prev[n - 1];
+      let skip = Math.min(n, w.length);
+      for (const j of [n, n - 1, n + 1, n - 2, n + 2]) if (j >= 1 && j <= w.length && w[j - 1] === last) { skip = j; break; }
+      return w.slice(skip).join(' ');
+    },
+    // ms to read L seconds of audio on this device
+    cost(L) { const b = this.perSec.length ? this.perSec.slice().sort((x, y) => x - y)[this.perSec.length >> 1] : 110; return this.costA + b * L; },
+    // Fast device: re-read the phrase every moment (smooth live tracking). Slow device (most phones): that
+    // would fall further and further behind, so each stretch of audio is read once, in chunks cut at the
+    // gaps between words, long enough that the device keeps up (the delay then stays the same).
+    // (live re-reading keeps up while reading 7 s of audio takes under ~70% of those 7 s)
+    slowDevice() { return this.cost(7) > (+new URLSearchParams(location.search).get("slowms") || 5000); },
+    chunkSecs() {
+      if (!this.slowDevice()) return 7;
+      const b = this.perSec.length ? this.perSec.slice().sort((x, y) => x - y)[this.perSec.length >> 1] / 1000 : 0.11;
+      const L = (this.costA / 1000) / Math.max(0.15, 0.75 - b);   // a + b*L <= 0.75*L
+      return Math.min(7, Math.max(2.5, L));
+    },
+    showSpeed() {
+      const el = $('asrSpeed'); if (!el || !this.ms.length) return;
+      const avg = this.ms.reduce((a, b) => a + b, 0) / this.ms.length;
+      el.textContent = 'Speech model on this device: ' + (avg / 1000).toFixed(1) + ' s per reading' + (this.threads > 1 ? ' (' + this.threads + ' threads)' : ' (1 thread)')
+        + (this.slowDevice() ? '; reading in ' + this.chunkSecs().toFixed(1) + ' s chunks to keep up' : '; live reading') + ' (7 s of recitation: ' + (this.cost(7) / 1000).toFixed(1) + ' s).';
+    },
     // A phrase's words, in order. In teacher mode, a result that would stop the reciter is checked first:
     // the same audio is transcribed again, shifted by half a second of silence. The small model sometimes
     // garbles a word once (تفاوت -> "تفاق"); a real slip (الجنوب) is heard the same way both times.
     // Only when both readings show the mistake does Sabaq stop.
     async judge(text, seg) {
-      if (!text.trim()) { renderStatus(); return; }
+      this.judgedSeg = Math.max(this.judgedSeg, seg);
+      const full = E.tokenize(text);
+      text = this.unlocked(text, seg);
+      // (nothing new: still arm the end-of-phrase check, which judges a slip on the ayah's last word)
+      if (!text.trim()) { commit('', true, true); return; }
       const stopsWith = t => { const C = T.clone(); const n0 = C.events.length; C.feed(E.tokenize(t)); C.flush(); return C.events.slice(n0).find(e => e.type === 'stop') || null; };
       const audioSeg = this.audioOf.get(seg);
       if (!T.strict || !audioSeg || !stopsWith(text)) { commit(text, true, true); return; }
-      const alt = await this.verify(audioSeg);
+      // the second reading also hears the end of the previous phrase: a different context makes the model
+      // decode afresh (a garble caused by how the audio was cut, or by a fast join, is then not repeated)
+      const prev = this.audioOf.get(seg - 1);
+      const alt = await this.verify(audioSeg, prev ? prev.subarray(Math.max(0, prev.length - 24000)) : null);
       if (window.__asrLog) window.__asrLog.push({ kind: 'verify', seg, text: alt, at: performance.now() }); // dev-only test log
-      if (alt && alt.trim() && !stopsWith(alt)) { commit(alt, true, true); return; }
+      // drop the words of that context: the second reading starts where this phrase's first word is found
+      let altW = alt ? E.tokenize(alt) : [];
+      if (prev && full.length) { const i = altW.indexOf(full[0]); if (i > 0 && i <= 6) altW = altW.slice(i); }
+      const altRest = altW.length ? this.unlocked(altW.join(' '), seg) : '';
+      if (altRest.trim() && !stopsWith(altRest)) { commit(altRest, true, true); return; }
       // both readings show the mistake: stop now (the reciter has paused; no need to wait for more words)
       commit(text, true, true);
       if (!P) { clearTimeout(idleTimer); T.flush(); handleEvents(); render(); }
     },
-    verify(audioSeg) {
+    verify(audioSeg, before) {
       return new Promise(res => {
-        const pad = new Float32Array(8000 + audioSeg.length + 4800);
-        pad.set(audioSeg, 8000);
+        const lead = before ? before.length : 8000;
+        const pad = new Float32Array(lead + audioSeg.length + 4800);
+        if (before) pad.set(before, 0);
+        pad.set(audioSeg, lead);
         const timer = setTimeout(() => { if (this.verifyWait === done) this.verifyWait = null; res(null); }, 25000);
         const done = t => { clearTimeout(timer); res(t); };
         this.verifyWait = done;

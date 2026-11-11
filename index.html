@@ -6,6 +6,7 @@
 <meta name="description" content="Recite the Quran from memory; Sabaq follows you word by word and a qari corrects your mistakes.">
 <meta name="theme-color" content="#f4f6f3" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0e1416" media="(prefers-color-scheme: dark)">
+<script>(function(){if(window.crossOriginIsolated||!window.isSecureContext||!("serviceWorker" in navigator))return;var k="sabaq-coi";function once(){try{if(sessionStorage.getItem(k))return;sessionStorage.setItem(k,"1")}catch(e){return}location.reload()}navigator.serviceWorker.register("coi-sw.js").then(function(){if(navigator.serviceWorker.controller)return;navigator.serviceWorker.addEventListener("controllerchange",once)}).catch(function(){})})();</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head>
 <body>
@@ -13,7 +14,7 @@
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Readex+Pro:wght@300;400;500;600&family=Reem+Kufi:wght@600&display=swap">
+<link rel="stylesheet" crossorigin href="https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Readex+Pro:wght@300;400;500;600&family=Reem+Kufi:wght@600&display=swap">
 <style>
 /* Layout: one-screen app. Header / scrolling mushaf page (the subject) / control dock.
    The page reads like a mushaf: cool paper, ink, gilt ayah markers, lapis for the one control that matters. */
@@ -311,6 +312,7 @@ textarea { width: 100%; min-height: 7.5rem; border: 1px solid var(--rule); backg
           <option value="model">Sabaq Quran model (works on iPhone)</option>
           <option value="browser">Browser (Google in Chrome)</option>
         </select>
+        <small class="hint" id="asrSpeed"></small>
       </label>
       <p class="hint">The Sabaq Quran model is Tarteel's open model trained on Quran recitation. It runs on your phone, downloads once (about 38 MB), and is used automatically on iPhone and Safari.</p>
       <p class="hint">Or type or paste Arabic words. They go through the same engine as speech, a few words at a time.</p>

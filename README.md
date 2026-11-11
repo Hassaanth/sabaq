@@ -19,6 +19,15 @@ the microphone, and recite.
   Transformers.js). It downloads once (about 38 MB) and is then cached. Speech is cut into phrases where you
   pause; each phrase takes about 2 s to transcribe (live updates while you recite); nothing is sent to a server.
 
+**Tracking while you recite.** The model re-reads what you have said so far every moment and locks in
+words as soon as they are confirmed correct, so the highlight moves word by word, not phrase by phrase.
+Anything that looks like a mistake waits for the phrase's final reading and a double-check (read again with
+the end of the previous phrase as context), so a one-off garble never stops you. On a slower phone the app
+measures its own speed and, if live re-reading would fall behind, reads each stretch once in chunks cut at
+the gaps between words, so the delay stays constant. On the website the model uses several CPU threads
+(`coi-sw.js`, a tiny service worker, adds the isolation headers GitHub Pages can't send). The speed on your
+device is shown under the keyboard button › Speech recognition.
+
 The mic button's ring follows your voice, so you can see you are being heard, and the status line says
 when a phrase was heard and is still being read. The model starts downloading as soon as the page opens.
 With the model, a result that would stop you is double-checked first: the same audio is transcribed again,

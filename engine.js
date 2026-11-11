@@ -171,10 +171,11 @@
       }
       // Two words recited joined (wasl) are often written by the recogniser as one word with the join
       // blurred: هل أتاك -> "الأتاك". The second word is there in full; the first is only "not clearly heard".
-      if (best.s < STRONG && p + 1 < this.N) {
+      // (also when the joined form scored as a near match above: البصاكرتين for البصر كرتين)
+      if ((best.s < STRONG || (best.nt === 2 && best.s < 1)) && p + 1 < this.N) {
         const k2 = this.keys[p + 1];
         if (k2.length >= 3 && r.length > k2.length && r.endsWith(k2) && sim(r.slice(0, r.length - k2.length), k) >= 0.5) {
-          best = { s: STRONG, nr: 1, nt: 2, blend: true };
+          best = { s: Math.max(STRONG, best.nt === 2 ? best.s : 0), nr: 1, nt: 2, blend: true };
         }
       }
       return best;

@@ -20,7 +20,11 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           if [ -z "$HF_TOKEN" ]; then echo "No HF_TOKEN secret yet: nothing to deploy."; echo "skip=1" >> "$GITHUB_OUTPUT"; exit 0; fi
-          user=$(curl -sf -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/api/whoami-v2 | python3 -c 'import sys,json; print(json.load(sys.stdin)["name"])')
+          tok=$(printf %s "$HF_TOKEN" | tr -d '[:space:]')   # (a pasted token often carries a space or line break)
+          code=$(curl -s -o /tmp/who.json -w '%{http_code}' -H "Authorization: Bearer $tok" https://huggingface.co/api/whoami-v2)
+          echo "whoami: HTTP $code (token starts with ${tok:0:3}, length ${#tok})"
+          if [ "$code" != 200 ]; then head -c 300 /tmp/who.json; echo; echo '::error::Hugging Face did not accept HF_TOKEN. Create a new Write token and save it again as the HF_TOKEN secret.'; exit 1; fi
+          user=$(python3 -c 'import json; print(json.load(open("/tmp/who.json"))["name"])')
           echo "user=$user" >> "$GITHUB_OUTPUT"
           host=$(echo "$user-sabaq" | tr '[:upper:]_.' '[:lower:]--')
           echo "Space: https://huggingface.co/spaces/$user/sabaq  (app: https://$host.hf.space)"
@@ -30,6 +34,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          HF_TOKEN=$(printf %s "$HF_TOKEN" | tr -d '[:space:]')
           code=$(curl -s -o /tmp/create.json -w '%{http_code}' -X POST https://huggingface.co/api/repos/create \
             -H "Authorization: Bearer $HF_TOKEN" -H 'Content-Type: application/json' \
             -d '{"type":"space","name":"sabaq","sdk":"docker","private":false}')
@@ -42,6 +47,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_USER: ${{ steps.hf.outputs.user }}
         run: |
+          HF_TOKEN=$(printf %s "$HF_TOKEN" | tr -d '[:space:]')
           mkdir -p /tmp/space/server
           cp index.html app.js engine.js quran-data.js asr-worker.js coi-sw.js /tmp/space/
           cp server/asr-server.js server/package.json server/package-lock.json /tmp/space/server/

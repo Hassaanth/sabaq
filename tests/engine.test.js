@@ -229,6 +229,19 @@ console.log('Recite from anywhere (auto-detect)');
   check('a wrong word in the first (locating) phrase is marked (no teacher mode)', t.state[p] === WRONG, { st: t.state[p] });
 }
 
+{
+  // the recogniser writes two joined words as one, blurring the join (هل أتاك -> الأتاك): not a mistake
+  const w = [...words(85, 15, 16), 'الاتاك', 'حديث', 'الجنود', ...words(85, 18, 18)];
+  const t = new E.Tracker(M); t.strict = true;
+  for (const x of w) t.feed([x]); t.flush();
+  const hal = M.pos(85, 17);
+  check('joined words written as one (wasl) do not stop you', t.stopped < 0 && t.state[hal] === UNCLEAR && t.state[hal + 1] === CORRECT, { stopped: t.stopped, st: [t.state[hal], t.state[hal + 1]] });
+  const w2 = [...words(85, 15, 16), 'الاتاك', 'حديث', 'الجنوب', 'فرعون'];
+  const t2 = new E.Tracker(M); t2.strict = true;
+  for (const x of w2) t2.feed([x]);
+  check('...and a real slip right after them still stops you', t2.stopped === hal + 3, { stopped: t2.stopped - hal });
+}
+
 console.log('Continuity');
 {
   const t = recite(at(112, 1), [...words(112, 1, 4), 'بسم', 'الله', 'الرحمن', 'الرحيم', ...words(113, 1, 5)]);

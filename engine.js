@@ -169,6 +169,14 @@
         const s = sim(r, k + this.keys[p + 1]);
         if (s >= STRONG && s > best.s + 0.05) best = { s, nr: 1, nt: 2 };
       }
+      // Two words recited joined (wasl) are often written by the recogniser as one word with the join
+      // blurred: هل أتاك -> "الأتاك". The second word is there in full; the first is only "not clearly heard".
+      if (best.s < STRONG && p + 1 < this.N) {
+        const k2 = this.keys[p + 1];
+        if (k2.length >= 3 && r.length > k2.length && r.endsWith(k2) && sim(r.slice(0, r.length - k2.length), k) >= 0.5) {
+          best = { s: STRONG, nr: 1, nt: 2, blend: true };
+        }
+      }
       return best;
     }
 
@@ -321,7 +329,7 @@
       if (st === WRONG || st === MISSED) this.events.push({ type: 'mistake', pos: p, state: st });
     }
     _accept(p, m, r) {
-      for (let k = 0; k < m.nt; k++) this._mark(p + k, CORRECT);
+      for (let k = 0; k < m.nt; k++) this._mark(p + k, m.blend && k === 0 && this.state[p] !== CORRECT ? UNCLEAR : CORRECT);
       this.c = p + m.nt;
       this.qi = r + m.nr;
       this.lost.length = 0;
@@ -434,6 +442,7 @@
           // Stopped here and corrected: a new attempt that is close (and not the same mistake again)
           // is accepted, so a recogniser's slightly different spelling of the right word lets you move on.
           if (this.strict && c === this.stopped && this._lenient(q.slice(r, r + d.nr).join(''), d.s)) { this._accept(c, d, r); return true; }
+          if (d.blend) { this._accept(c, d, r); return true; }
           // A spelling-only difference is recogniser noise. A changed consonant (الجنوب for الجنود) is a slip.
           const st = spellingOnly(q.slice(r, r + d.nr).join(''), m.keys.slice(c, c + d.nt).join('')) ? CORRECT : CLOSE;
           for (let k = 0; k < d.nt; k++) this._mark(c + k, st, heardAt(r, d.nr));

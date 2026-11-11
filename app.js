@@ -135,15 +135,12 @@
       const w = document.createElement('bdi'); w.className = 'stopword'; w.lang = 'ar'; w.dir = 'rtl'; w.textContent = M.disp[p];
       const at = M.where(p);
       if (Qari.speaking === p) {
-        tx.replaceChildren(document.createTextNode('Listen: '), w);
+        tx.replaceChildren(document.createTextNode('Listen to the qari: '), w);
+      } else if (Coach.waiting() && Coach.pos === p) {
+        const n = Coach.secsLeft();
+        tx.replaceChildren(document.createTextNode(n ? 'Stopped. Say the word yourself (' + n + ')' : 'Stopped. Listening to your try…'));
       } else {
-        const again = document.createElement('button');
-        again.className = 'link'; again.type = 'button'; again.textContent = 'Hear it again';
-        again.addEventListener('click', () => { audio(); Qari.play(p); });
-        const on = document.createElement('button');
-        on.className = 'link'; on.type = 'button'; on.textContent = 'Move on';
-        on.addEventListener('click', () => { T.moveOn(); P = null; phraseSkip = 0; handleEvents(); render(); });
-        tx.replaceChildren(document.createTextNode('Your turn: say '), w, document.createTextNode(' or the whole ayah (' + at.surah + ':' + at.ayah + '). '), again, document.createTextNode(' · '), on);
+        tx.replaceChildren(document.createTextNode('Your turn: say '), w, document.createTextNode(' or the whole ayah (' + at.surah + ':' + at.ayah + '), then carry on.'));
       }
       return;
     }
@@ -154,8 +151,10 @@
         : 'Getting the Quran speech model ready… You can start reciting.';
       return;
     }
-    if (live && !locked) { st.dataset.live = 'finding'; tx.textContent = 'Listening. Keep reciting and Sabaq will find where you are.'; return; }
-    if (live) { st.dataset.live = 'on'; tx.textContent = 'Following you · ' + where(Math.min(view.c, M.N - 1)); return; }
+    // Sabaq's own model: say when a phrase was heard and is still being read (slower phones)
+    const reading = live && Input.kind === 'model' && (ModelMic.finals.length > 0 || ModelMic.busyKind === 'final' || ModelMic.busyKind === 'verify');
+    if (live && !locked) { st.dataset.live = 'finding'; tx.textContent = reading ? 'Heard you. Working out what you recited…' : 'Listening. Keep reciting and Sabaq will find where you are.'; return; }
+    if (live) { st.dataset.live = 'on'; tx.textContent = 'Following you · ' + where(Math.min(view.c, M.N - 1)) + (reading ? ' · reading…' : ''); return; }
     st.dataset.live = 'off';
     if (!locked) {
       tx.replaceChildren(document.createTextNode('Tap the mic and recite from any surah. No mic? '), demoLink());
@@ -198,7 +197,7 @@
   // Quran.com's word audio, which works when the app runs on its own site (not inside claude.ai).
   const pad3 = n => String(n).padStart(3, '0');
   const Qari = {
-    packs: {}, cache: new Map(), speaking: -1, gateUntil: 0, source: null,
+    packs: {}, cache: new Map(), speaking: -1, gateUntil: 0, soundUntil: 0, source: null,
     async buffer(p) {
       if (this.cache.has(p)) return this.cache.get(p);
       const a = audio(); if (!a) return null;
@@ -258,8 +257,54 @@
       this.packs[surahNo].catch(() => { delete this.packs[surahNo]; });
     },
     gated() { return Date.now() < this.gateUntil; },
+    // browser recognition also ignores what it hears during the stop sound
+    gatedAny() { return Date.now() < Math.max(this.gateUntil, this.soundUntil); },
     quiet() { return new Promise(res => { const tick = () => (this.gated() ? setTimeout(tick, 100) : res()); tick(); }); },
   };
+
+  // ---------------------------------------------------------------- teacher mode: after a stop
+  // The reciter first gets 3 seconds to find the word themselves. If they say it, it is ticked and they
+  // carry on. If they don't (or say it wrong), the qari recites it; then they repeat the word or the
+  // whole ayah and move on. An attempt still being heard or transcribed when the 3 s end is waited for.
+  const Coach = {
+    pos: -1, played: false, until: 0, timer: 0, started: 0,
+    stop(p, state) {
+      if (p !== this.pos || T.stopped !== p) { this.pos = p; this.played = false; this.until = 0; }
+      clearTimeout(this.timer);
+      // a wrong try after the grace, or after the qari already said it: correct at once
+      if (this.played || (this.until && Date.now() > this.started + 300)) { this.until = 0; this.qari(); return; }
+      this.started = Date.now(); this.until = Date.now() + 3000;
+      // the stop sound is not the reciter (browser recognition; Sabaq's own mic cancels its echo, and
+      // muting it here would cut the reciter's phrase in half)
+      Qari.soundUntil = Date.now() + 650;
+      toast(state === MISSED ? 'Stop. A word was skipped. Can you say it?'
+        : state === WRONG ? 'Stop. That word is not right. Can you say it?'
+        : 'Stop. Not quite right. Say it again.', 3000);
+      this.tick();
+    },
+    tick() {
+      clearTimeout(this.timer);
+      if (T.stopped !== this.pos || !T.strict) { this.until = 0; render(false); return; } // fixed, or moved on
+      const busy = attemptInFlight();
+      if (Date.now() >= this.until && (!busy || Date.now() > this.until + 15000)) { this.until = 0; this.qari(); return; }
+      this.timer = setTimeout(() => this.tick(), 150);
+      renderStatus();
+    },
+    qari() {
+      this.played = true;
+      Qari.play(this.pos, 150);
+    },
+    waiting() { return this.until > 0 && T.stopped === this.pos; },
+    secsLeft() { return Math.max(0, Math.ceil((this.until - Date.now()) / 1000)); },
+    reset() { clearTimeout(this.timer); this.pos = -1; this.played = false; this.until = 0; },
+  };
+  // the reciter is mid-attempt: words on screen not yet settled, or audio still being heard / transcribed
+  function attemptInFlight() {
+    if (P) return true;
+    if (Feed.pending.length) return true;
+    if (Input.kind === 'model' && ModelMic.on && (ModelMic.inSpeech || ModelMic.busy || ModelMic.finals.length)) return true;
+    return false;
+  }
 
   const canVibrate = () => !!navigator.vibrate && (!navigator.userActivation || navigator.userActivation.hasBeenActive);
 
@@ -279,10 +324,7 @@
       else if (e.type === 'stop') {
         soundStop();
         if (canVibrate()) { try { navigator.vibrate([70, 50, 70]); } catch (err) { /* not allowed */ } }
-        toast(e.state === MISSED ? 'Stop. A word was skipped. Listen, then say it.'
-          : e.state === WRONG ? 'Stop. That is a different word. Listen, then say it.'
-          : 'Stop. Not quite right. Listen, then say it.', 3200);
-        Qari.play(e.pos, 520);
+        Coach.stop(e.pos, e.state);
       }
       else if (e.type === 'moveOn') {
         toast((e.auto ? 'Moving on after 3 tries. ' : 'Moving on. ') + M.disp[e.pos] + ' is marked for review.', 3200);
@@ -304,7 +346,7 @@
   function commit(text, wholePhrase, fromModel) {
     let words = E.tokenize(text);
     const k = Math.min(phraseSkip, words.length);
-    if (Qari.gated() && !fromModel) words = [];  // the qari was speaking: that is not the reciter
+    if (Qari.gatedAny() && !fromModel) words = [];  // the qari was speaking: that is not the reciter
     else words = words.slice(k);
     phraseSkip = wholePhrase ? 0 : phraseSkip - k;
     P = null;
@@ -317,12 +359,13 @@
   }
   function preview(text, fromModel) {
     if (E.tokenize(text).length) clearTimeout(idleTimer); // only real new speech postpones the end-of-phrase check
-    if (Qari.gated() && !fromModel) { phraseSkip = Math.max(phraseSkip, E.tokenize(text).length); return; }
+    if (Qari.gatedAny() && !fromModel) { phraseSkip = Math.max(phraseSkip, E.tokenize(text).length); return; }
     const words = E.tokenize(text).slice(phraseSkip);
     if (!words.length) { if (P) { P = null; render(); } return; }
     P = T.clone();
     P.feed(words);
-    if (T.strict && P.events.some(e => e.type === 'stop')) {
+    // (not on the model's live guesses: they are often garbled mid-phrase; its final result decides)
+    if (T.strict && !fromModel && P.events.some(e => e.type === 'stop')) {
       // stop right now, on the live words, instead of waiting for the phrase to settle
       T = P; P = null; phraseSkip += words.length;
       handleEvents();
@@ -536,6 +579,7 @@
     worker: null, ready: false, failed: false, files: {}, stream: null, src: null, node: null, sink: null,
     on: false, seg: 0, inSpeech: false, buf: [], len: 0, pre: [], preLen: 0, run: 0, silence: 0,
     floor: 0.004, busy: false, finals: [], partial: null, lastPartial: 0, rs: null, frame: [], frameLen: 0, ms: [],
+    busyKind: '', chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
 
     loadPct() {
       let l = 0, t = 0;
@@ -560,12 +604,13 @@
         toast('Could not download the speech model. Check the connection and tap the mic again.', 6000);
         this.worker.terminate(); this.worker = null; this.stop();
       } else if (m.type === 'result') {
-        this.busy = false;
+        this.busy = false; this.busyKind = '';
         if (m.ms) { this.ms.push(m.ms); if (this.ms.length > 8) this.ms.shift(); }
-        if (window.__asrLog) window.__asrLog.push({ kind: m.kind, seg: m.seg, ms: m.ms, text: m.text }); // dev-only test log
-        if (m.kind === 'final') commit(m.text, true, true);
+        if (window.__asrLog) window.__asrLog.push({ kind: m.kind, seg: m.seg, ms: m.ms, secs: m.secs, at: performance.now(), text: m.text }); // dev-only test log
+        if (m.kind === 'final') this.chain = this.chain.then(() => this.judge(m.text, m.seg)).catch(() => {});
+        else if (m.kind === 'verify') { const f = this.verifyWait; this.verifyWait = null; if (f) f(m.text); }
         // a live transcription is cut wherever the audio was, often mid-word: its last word is left for the final one
-        else if (m.seg === this.seg && this.inSpeech) preview(m.text.trim().split(/s+/).slice(0, -1).join(' '), true);
+        else if (m.seg === this.seg && this.inSpeech) preview(m.text.trim().split(/\s+/).slice(0, -1).join(' '), true);
         this.pump();
         if (!this.on && !this.busy && !this.finals.length) settle();
       }
@@ -583,21 +628,66 @@
           : 'Microphone access was blocked. Allow it in the browser and try again.', 7000);
         return;
       }
-      if (a.state !== 'running') { try { await a.resume(); } catch (e) { /* tried */ } }
-      this.src = a.createMediaStreamSource(this.stream);
-      this.node = a.createScriptProcessor(4096, 1, 1);
-      this.sink = a.createGain(); this.sink.gain.value = 0; // keep the processor running without making sound
-      this.rs = { ratio: a.sampleRate / 16000, pos: 0, acc: 0, n: 0 };
-      this.node.onaudioprocess = e => this.onAudio(e.inputBuffer.getChannelData(0));
-      this.src.connect(this.node); this.node.connect(this.sink); this.sink.connect(a.destination);
       this.on = true; this.inSpeech = false; this.buf = []; this.len = 0; this.pre = []; this.preLen = 0; this.run = 0; this.silence = 0;
+      this.frame = []; this.recent = []; this.frames = 0; this.level = 0; this.rebuilt = false;
+      await this.connect(a);
       this.stream.getAudioTracks().forEach(t => { t.onended = () => { if (this.on) { toast('The microphone stopped.', 4000); this.stop(); } }; });
       setMic('listening');
+      this.meter();
+    },
+    // mic -> processor (kept running through a silent gain) -> 16 kHz frames
+    async connect(a) {
+      this.ctx = a;
+      if (a.state !== 'running') { try { await a.resume(); } catch (e) { /* tried */ } }
+      a.onstatechange = () => { if (this.on && this.ctx === a && a.state !== 'running' && a.state !== 'closed') a.resume().catch(() => {}); };
+      this.src = a.createMediaStreamSource(this.stream);
+      this.node = a.createScriptProcessor(4096, 1, 1);
+      this.sink = a.createGain(); this.sink.gain.value = 0;
+      this.rs = { ratio: a.sampleRate / 16000, pos: 0, acc: 0, n: 0 };
+      this.nonzero = false; this.frames = 0;
+      this.node.onaudioprocess = e => this.onAudio(e.inputBuffer.getChannelData(0));
+      this.src.connect(this.node); this.node.connect(this.sink); this.sink.connect(a.destination);
+      // iPhone: the audio engine can come up "interrupted" or deliver only silence once the mic switches it
+      // to recording. If no real sound arrives within 2 s, rebuild the path once in a fresh audio context
+      // (allowed without a tap while the microphone is in use).
+      clearTimeout(this.watch);
+      this.watch = setTimeout(() => this.check(), 2000);
+    },
+    async check() {
+      if (!this.on) return;
+      // audio is flowing (a silent room can be true digital silence with noise suppression on)
+      if (this.frames > 0 && this.ctx.state === 'running') return;
+      if (this.rebuilt) { toast('The microphone is not sending sound. Close other apps using it, then tap the mic again.', 6000); return; }
+      this.rebuilt = true;
+      this.unhook();
+      const C = window.AudioContext || window.webkitAudioContext;
+      let fresh = null; try { fresh = new C(); } catch (e) { /* none */ }
+      if (fresh) await this.connect(fresh);
+    },
+    unhook() {
+      try { if (this.node) { this.node.onaudioprocess = null; this.node.disconnect(); } if (this.src) this.src.disconnect(); if (this.sink) this.sink.disconnect(); } catch (e) { /* gone */ }
+      if (this.ctx && this.ctx !== actx) { const c = this.ctx; c.onstatechange = null; c.close().catch(() => {}); }
+      this.src = this.node = this.sink = null;
+    },
+    // the mic button's ring follows the voice, so the reciter can see they are being heard
+    meter() {
+      const b = $('micBtn');
+      const tick = () => {
+        if (!this.on) { b.style.removeProperty('--lvl'); return; }
+        const v = Math.min(1, Math.max(0, Math.log10(Math.max(this.level, 1e-4) / Math.max(this.floor * 2, 0.002)) / 1.2));
+        b.style.setProperty('--lvl', v.toFixed(2));
+        b.dataset.hear = this.inSpeech ? '1' : '0';
+        this.level *= 0.8;
+        setTimeout(tick, 60);
+      };
+      tick();
     },
     stop() {
       if (this.inSpeech) this.endSegment();
       this.on = false;
-      try { if (this.node) { this.node.onaudioprocess = null; this.node.disconnect(); } if (this.src) this.src.disconnect(); if (this.sink) this.sink.disconnect(); } catch (e) { /* gone */ }
+      clearTimeout(this.watch);
+      this.unhook();
+      $('micBtn').dataset.hear = '0';
       if (this.stream) this.stream.getTracks().forEach(t => t.stop());
       this.stream = this.src = this.node = this.sink = null;
       setMic('idle');
@@ -606,6 +696,7 @@
     // resample to 16 kHz (averaging the input samples that fall in each output sample) in 20 ms frames
     onAudio(input) {
       if (!this.on) return;
+      if (!this.nonzero) for (let i = 0; i < input.length; i += 64) if (input[i] !== 0) { this.nonzero = true; break; }
       const rs = this.rs;
       for (let i = 0; i < input.length; i++) {
         rs.acc += input[i]; rs.n++;
@@ -627,27 +718,41 @@
       }
       let e = 0; for (let i = 0; i < f.length; i++) e += f[i] * f[i];
       const rms = Math.sqrt(e / f.length);
+      this.frames++; this.level = Math.max(rms, this.level * 0.85);
+      // Noise floor = the quietest moment of the last ~3 s, so a fan, an air conditioner or a noisy room
+      // raises it (the old floor only learned from quiet frames and could get stuck "always speaking").
+      this.recent.push(rms); if (this.recent.length > 150) this.recent.shift();
+      // (frozen while a phrase is heard: the gaps between words are not the room, and a raised floor would
+      // cut off soft word endings; it may still go down)
+      if (this.frames % 10 === 0) {
+        let mn = Infinity; for (const v of this.recent) if (v < mn) mn = v;
+        if (!this.inSpeech || mn < this.floor) this.floor = Math.max(0.0008, mn);
+      }
       const thr = Math.max(0.006, this.floor * 3);
       const voiced = rms > thr;
       if (!this.inSpeech) {
-        this.floor = voiced ? this.floor : this.floor * 0.95 + rms * 0.05;
         this.pre.push(f); this.preLen += f.length;
         while (this.preLen > 16000 * 0.35) this.preLen -= this.pre.shift().length;
         this.run = voiced ? this.run + 1 : 0;
         if (this.run >= 3) {
-          this.inSpeech = true; this.seg++; this.silence = 0;
+          this.inSpeech = true; this.seg++; this.silence = 0; this.voicedN = this.run;
           this.buf = this.pre; this.len = this.preLen; this.pre = []; this.preLen = 0;
           this.lastPartial = performance.now();
         }
         return;
       }
       this.buf.push(f); this.len += f.length;
+      if (voiced) this.voicedN++;
       this.silence = voiced ? 0 : this.silence + 20;
       if (this.silence >= 650) { this.endSegment(); return; }
-      // A long phrase without a pause is cut after 12 s, only at a silent moment (never inside a stretched
-      // word); at most 25 s (the model hears up to 30 s, and costs the same for any length).
-      if ((this.len >= 16000 * 12 && rms < thr * 0.8) || this.len >= 16000 * 25) {
-        this.endSegment(); this.inSpeech = true; this.seg++; this.silence = 0; this.lastPartial = performance.now(); return;
+      // A long phrase is cut sooner (the small model drops the last words of long phrases): after 7 s at a
+      // short pause between words (160 ms, longer than the stops inside a word), after 14 s at a 100 ms
+      // pause (never inside a fading word ending), and at 25 s regardless.
+      if ((this.len >= 16000 * 7 && this.silence >= 160) || (this.len >= 16000 * 14 && this.silence >= 100) || this.len >= 16000 * 25) {
+        this.endSegment(); this.inSpeech = true; this.seg++; this.silence = 0; this.lastPartial = performance.now();
+        // 12 s without a pause may be room noise, not recitation: let the floor learn the last 3 s
+        let mn = Infinity; for (const v of this.recent) if (v < mn) mn = v; this.floor = Math.max(0.0008, mn);
+        return;
       }
       // live transcription of the phrase so far (skipped when the device is too slow for it)
       // (each run takes about 2 s in a phone browser, whatever the length; skipped on slower devices)
@@ -666,15 +771,48 @@
     endSegment() {
       // keep the whole phrase, including the quiet end: soft final syllables (a fading madd) live there
       const audioSeg = this.join();
+      const voicedN = this.voicedN; this.voicedN = 0;
       this.inSpeech = false; this.buf = []; this.len = 0; this.silence = 0; this.partial = null;
-      if (audioSeg.length > 16000 * 0.25) { this.finals.push({ kind: 'final', seg: this.seg, audio: audioSeg.slice() }); this.pump(); }
+      // a click, a cough or a door is not a phrase: at least 0.2 s of clear sound
+      if (audioSeg.length > 16000 * 0.25 && voicedN >= 10) {
+        this.audioOf.set(this.seg, audioSeg); if (this.audioOf.size > 6) this.audioOf.delete(this.audioOf.keys().next().value);
+        this.finals.push({ kind: 'final', seg: this.seg, audio: audioSeg.slice() }); this.pump();
+      }
+    },
+    // A phrase's words, in order. In teacher mode, a result that would stop the reciter is checked first:
+    // the same audio is transcribed again, shifted by half a second of silence. The small model sometimes
+    // garbles a word once (تفاوت -> "تفاق"); a real slip (الجنوب) is heard the same way both times.
+    // Only when both readings show the mistake does Sabaq stop.
+    async judge(text, seg) {
+      if (!text.trim()) { renderStatus(); return; }
+      const stopsWith = t => { const C = T.clone(); const n0 = C.events.length; C.feed(E.tokenize(t)); C.flush(); return C.events.slice(n0).find(e => e.type === 'stop') || null; };
+      const audioSeg = this.audioOf.get(seg);
+      if (!T.strict || !audioSeg || !stopsWith(text)) { commit(text, true, true); return; }
+      const alt = await this.verify(audioSeg);
+      if (window.__asrLog) window.__asrLog.push({ kind: 'verify', seg, text: alt, at: performance.now() }); // dev-only test log
+      if (alt && alt.trim() && !stopsWith(alt)) { commit(alt, true, true); return; }
+      // both readings show the mistake: stop now (the reciter has paused; no need to wait for more words)
+      commit(text, true, true);
+      if (!P) { clearTimeout(idleTimer); T.flush(); handleEvents(); render(); }
+    },
+    verify(audioSeg) {
+      return new Promise(res => {
+        const pad = new Float32Array(8000 + audioSeg.length + 4800);
+        pad.set(audioSeg, 8000);
+        const timer = setTimeout(() => { if (this.verifyWait === done) this.verifyWait = null; res(null); }, 25000);
+        const done = t => { clearTimeout(timer); res(t); };
+        this.verifyWait = done;
+        this.finals.unshift({ kind: 'verify', seg: -1, audio: pad }); // before any later phrase
+        this.pump();
+      });
     },
     pump() {
       if (this.busy || !this.ready || !this.worker) return;
       const job = this.finals.shift() || this.partial;
       if (job === this.partial) this.partial = null;
       if (!job) return;
-      this.busy = true;
+      this.busy = true; this.busyKind = job.kind;
+      if (job.kind !== 'partial') renderStatus();
       this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio }, [job.audio.buffer]);
     },
   };
@@ -683,6 +821,9 @@
   function showSiteNote() { if (IN_CLAUDE) $('siteNote').hidden = false; }
   if (IN_CLAUDE && (IS_IOS || /Android/i.test(navigator.userAgent))) showSiteNote();
   if (IN_CLAUDE) setTimeout(() => { if (!Input.dict) showSiteNote(); }, 11000); // claude.use answers within 10 s
+
+  // On the website, start downloading the speech model right away where it will be used (cached after once)
+  if (!IN_CLAUDE && chooseKind() === 'model') setTimeout(() => ModelMic.init(), 1200);
 
   // recogniser choice (type dialog)
   function syncRecSel() { const s = $('recSel'); if (s) s.value = store.get('recognizer', 'auto'); }
@@ -710,7 +851,12 @@
           else commit(ph.join(' '));
         }
         if (it.pause) { await sleep(it.pause); if (Input.sim !== token) return; }
-        if (it.afterQari) { await sleep(1300); await Qari.quiet(); await sleep(250); if (Input.sim !== token) return; }
+        // wait while the reciter stays silent (3 s), the qari says the word, and the mic opens again
+        if (it.afterQari && T.strict) {
+          for (let w = 0; w < 25 && T.stopped < 0 && Input.sim === token; w++) await sleep(100); // a slip at the end of an ayah is judged after a pause
+          while (T.stopped >= 0 && !Coach.played && Input.sim === token) await sleep(100);
+          await sleep(300); await Qari.quiet(); await sleep(250); if (Input.sim !== token) return;
+        }
       }
       if (Input.sim === token) stopSim();
     })();
@@ -723,7 +869,7 @@
   function clean(s, a) { return window.QURAN[s - 1].a[a - 1][1].replace(/_/g, ' ').split(' '); }
   function playBuruj() {
     closeAll();
-    T = new E.Tracker(M); P = null; phraseSkip = 0;
+    T = new E.Tracker(M); P = null; phraseSkip = 0; Coach.reset();
     T.strict = teachBtn.getAttribute('aria-pressed') === 'true';
     lastVis && lastVis.fill(-1);
     const a = n => clean(85, n);
@@ -733,7 +879,7 @@
   }
   function playDemo() {
     closeAll();
-    T = new E.Tracker(M); P = null; phraseSkip = 0;
+    T = new E.Tracker(M); P = null; phraseSkip = 0; Coach.reset();
     T.strict = teachBtn.getAttribute('aria-pressed') === 'true';
     lastVis && lastVis.fill(-1);
     const a1 = clean(67, 1), a2 = clean(67, 2), a3 = clean(67, 3), a4 = clean(67, 4), a5 = clean(67, 5);
@@ -744,14 +890,13 @@
     playPhrases([
       ['أعوذ', 'بالله', 'من', 'الشيطان', 'الرجيم'],
       ['بسم', 'الله', 'الرحمن', 'الرحيم'],
-      { w: skip, afterQari: true },
+      { w: skip, pause: 1700 },                                                // stopped: finds the word within 3 s, no qari
       a1.slice(k - 2),                                                         // goes back: "wa huwa 'ala kulli shay'in qadir"
       a2.slice(0, 4),                                                          // stops mid-ayah...
       a2,                                                                      // ...and restarts it: forgiven
-      slip.slice(0, 8), slip.slice(8),
-      wrong,
-      { w: a5.slice(0, 2), afterQari: true },
-      a4.slice(-2),                                                            // "wa huwa hasir"
+      ...(T.strict ? [a3.slice(0, 8), a3.slice(8)] : [slip.slice(0, 8), slip.slice(8)]), // (outside teacher mode: a "check")
+      { w: wrong, afterQari: true },                                           // a different word, then silence: the qari says it
+      a4.slice(-2),                                                            // repeats "wa huwa hasir" and carries on
       a5.slice(0, 6),
     ]);
     toast('Demo: a student reciting Al-Mulk from memory', 3200);
@@ -903,7 +1048,7 @@
   $('resetBtn').addEventListener('click', () => {
     const at = T.c;
     const strict = T.strict;
-    T = new E.Tracker(M); P = null; phraseSkip = 0; T.strict = strict;
+    T = new E.Tracker(M); P = null; phraseSkip = 0; Coach.reset(); T.strict = strict;
     if (at >= 0 && shown >= 0) T.setPosition(M.surahs[shown].start);
     closeAll(); render(false); main.scrollTop = 0;
     toast('Cleared. Ready to start again.');

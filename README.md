@@ -19,6 +19,11 @@ the microphone, and recite.
   Transformers.js). It downloads once (about 38 MB) and is then cached. Speech is cut into phrases where you
   pause; each phrase takes about 2 s to transcribe (live updates while you recite); nothing is sent to a server.
 
+The mic button's ring follows your voice, so you can see you are being heard, and the status line says
+when a phrase was heard and is still being read. The model starts downloading as soon as the page opens.
+With the model, a result that would stop you is double-checked first: the same audio is transcribed again,
+and Sabaq stops only if both readings show the mistake (the small model occasionally garbles a word once).
+
 Choose manually under the keyboard button › Speech recognition. On real recitation by Mishary Alafasy (Al-Mulk
 1–5, Al-Buruj 12–19) the model transcribed every word and Sabaq raised no false flags; it reports wrong and
 missing words as heard instead of "autocorrecting" them, which teacher mode depends on.
@@ -65,16 +70,17 @@ node tests/stress.test.js     # 60,000-word noisy-recitation simulation
 
 ## Teacher mode (on by default)
 
-For reciting from memory, eyes closed. The moment a word is skipped, changed, or said with a different
-letter (الجنوب for الجنود), Sabaq stops you on that word: it turns red and a low two-note sound plays
-(plus a vibration on phones), then **a qari recites the correct word**. It will not move on until you
-say it (the word alone, or go back and restart the phrase). Then a chime plays and the word gets a green ✓.
-Say it wrong again and the qari corrects you again.
+For reciting from memory, eyes closed, hands free (no buttons to press). The moment a word is skipped,
+changed, or said with a different letter (الجنوب for الجنود), Sabaq stops you on that word: it turns red and a
+low two-note sound plays (plus a vibration on phones). Then:
 
-To move on after a correction, either **repeat the word** or **repeat the ayah from its start** (any length).
+1. **You get 3 seconds to find it yourself.** Say the word (or go back and restart the phrase) and a chime
+   plays, the word gets a green ✓, and you carry on. An attempt still being heard when the 3 s end is waited for.
+2. **If you stay silent, or say it wrong, a qari recites the correct word.**
+3. **Then repeat the word, or the ayah from its start, and move on.** Say it wrong again and the qari
+   corrects you again; after 3 wrong tries it lets you move on (the word stays marked for review).
+
 A retry the recogniser hears slightly differently is accepted, as long as it isn't the same mistake again.
-After 3 wrong tries at one word it lets you move on, and **Move on** in the status line does it at any time;
-the word stays marked for review in the summary.
 
 * Words you were already saying when the sound played do not set it off again; if you keep going anyway, it signals again after 5 words.
 * Restarts never stop you. Spelling-only differences (داود / داوود) never stop you.

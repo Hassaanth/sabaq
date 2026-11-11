@@ -138,6 +138,9 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-b
 .mic { width: 64px; height: 64px; border-radius: 50%; border: 0; background: var(--lapis); color: var(--lapis-ink); display: grid; place-items: center; box-shadow: var(--shadow); position: relative; }
 .mic::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 2px solid var(--lapis); opacity: 0; }
 .mic[data-state="listening"]::after { animation: ring 1.6s ease-out infinite; }
+/* Sabaq's own model: the ring follows the voice level instead (--lvl, 0..1), solid while a phrase is heard */
+.mic[data-state="listening"][style*="--lvl"]::after { animation: none; opacity: calc(.25 + var(--lvl) * .75); transform: scale(calc(1 + var(--lvl) * .32)); transition: transform 80ms linear, opacity 80ms linear; }
+.mic[data-hear="1"]::after { border-width: 3px; }
 .mic[data-state="starting"] { opacity: .7; }
 .mic .i-stop { display: none; }
 .mic[data-state="listening"] .i-mic, .mic[data-state="starting"] .i-mic { display: none; }

@@ -413,6 +413,9 @@
               this.stopped = -1; this.attempts = 0; this.letContinue = false;
               // words recited while stopped were not followed: "not clearly heard", never "skipped"
               for (let x = c + 1; x < p; x++) if (this.state[x] === PENDING) this._mark(x, UNCLEAR);
+              // carrying on from the very next word right after the qari: the word itself was most likely said and
+              // clipped by the recogniser (a reply's first word often is): "not clearly heard", not "missed"
+              if (p === c + 1 && j === 0 && this.state[c] === MISSED) this._mark(c, UNCLEAR);
               this.events.push({ type: 'moveOn', pos: c, auto: true, continued: true });
               this._accept(p, mm, r + j);
               return true;

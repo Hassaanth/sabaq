@@ -764,7 +764,17 @@
       this.remote = false;
       this.worker = new Worker('asr-worker.js', { type: 'module' });
       this.worker.onmessage = e => this.onMessage(e.data);
-      this.worker.onerror = () => { this.failed = true; toast('The speech model could not start in this browser.', 6000); this.stop(); };
+      this.worker.onerror = () => {
+        // Under cross-origin isolation some browsers refuse the model's code (Safari): undo it and reload once
+        let tried = false; try { tried = !!sessionStorage.getItem('sabaq-unisolate'); } catch (err) { tried = true; }
+        if (self.crossOriginIsolated && navigator.serviceWorker && !tried) {
+          try { sessionStorage.setItem('sabaq-unisolate', '1'); } catch (err) { /* fine */ }
+          toast('Setting up the speech model for this browser…', 4000);
+          navigator.serviceWorker.getRegistrations().then(rs => Promise.all(rs.map(r => r.unregister()))).finally(() => location.reload());
+          return;
+        }
+        this.failed = true; toast('The speech model could not start in this browser. Try reloading the page.', 7000); this.stop();
+      };
       const slowX = +(new URLSearchParams(location.search).get('asrslow') || 0);
       this.worker.postMessage({ type: 'load', slow: slowX > 1 ? slowX : 0 });
     },

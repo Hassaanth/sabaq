@@ -738,8 +738,17 @@
       const saved = store.get('asrServer', null);
       if (saved !== null) { asrServer = saved || null; return; }
       if (IN_CLAUDE) return;
-      const r = await fetch('health', { cache: 'no-store' });
-      if (r.ok && /json/.test(r.headers.get('content-type') || '')) asrServer = location.origin.replace(/^http/, 'ws') + location.pathname.replace(/[^/]*$/, '') + 'asr';
+      const r = await fetch('health', { cache: 'no-store' }).catch(() => null);
+      if (r && r.ok && /json/.test(r.headers.get('content-type') || '')) { asrServer = location.origin.replace(/^http/, 'ws') + location.pathname.replace(/[^/]*$/, '') + 'asr'; return; }
+      // A server announced on this site: a computer running Sabaq's server (server/start-public.js) publishes its
+      // current public address in asr-url.json. Used only if it answers now; otherwise the in-browser model.
+      const a = await fetch('asr-url.json', { cache: 'no-store' }).then(x => (x.ok ? x.json() : null)).catch(() => null);
+      if (a && /^https:\/\//.test(a.url || '')) {
+        const base = a.url.replace(/\/+$/, ''), ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 3000);
+        const h = await fetch(base + '/health', { cache: 'no-store', mode: 'cors', signal: ctl.signal }).then(x => (x.ok ? x.json() : null)).catch(() => null);
+        clearTimeout(t);
+        if (h && h.ready) asrServer = base.replace(/^https/, 'wss') + '/asr';
+      }
     } catch (e) { /* no server here */ }
   })();
 
@@ -824,7 +833,7 @@
       const a = audio(); // inside the tap: lets the qari play later (iPhone)
       if (!a) { toast('Audio is not available in this browser.', 4000); return; }
       setMic('starting');
-      await Promise.race([asrServerReady, new Promise(r => setTimeout(r, 1500))]);
+      await Promise.race([asrServerReady, new Promise(r => setTimeout(r, 4000))]);
       this.init();
       try {
         this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });

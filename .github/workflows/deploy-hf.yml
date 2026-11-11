@@ -3,9 +3,9 @@
 # access token with "write" permission. The Space (<your-username>/sabaq) is created on the first run.
 name: Deploy speech server to Hugging Face
 
+# Run by hand only (Actions tab): Hugging Face now requires a PRO subscription for Docker Spaces
+# ("hosting Gradio and Docker Spaces on free cpu-basic requires a PRO subscription").
 on:
-  push:
-    branches: [main, master]
   workflow_dispatch:
 
 jobs:

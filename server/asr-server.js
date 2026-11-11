@@ -87,7 +87,8 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
 const FILES = new Set(['index.html', 'app.js', 'engine.js', 'quran-data.js', 'asr-worker.js', 'coi-sw.js']);
 const server = http.createServer((req, res) => {
   let name = decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '') || 'index.html';
-  if (name === 'health') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ready: !!(asr && asrLive), warm, queued: queue.length })); return; }
+  // (the Sabaq website on GitHub Pages checks this from its own address: allow it)
+  if (name === 'health') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'cross-origin-resource-policy': 'cross-origin' }); res.end(JSON.stringify({ ready: !!(asr && asrLive), warm, queued: queue.length })); return; }
   if (!FILES.has(name)) { res.writeHead(404); res.end('not found'); return; }
   // (no cross-origin isolation headers: Safari would then refuse the in-browser fallback model's code)
   res.writeHead(200, { 'content-type': TYPES[path.extname(name)], 'cache-control': 'no-cache' });

@@ -25,6 +25,7 @@
   --ok-bg: #dcefe3;
   --unclear: #7c8a90;
   --cursor-bg: #e6eef0;
+  --cursor-fill: #eedfbd;
   --shadow: 0 1px 2px rgb(22 33 30 / .06), 0 8px 24px rgb(22 33 30 / .08);
 
   --f-quran: "Amiri Quran", "Amiri", "Scheherazade New", "Noto Naskh Arabic", "Traditional Arabic", serif;
@@ -39,7 +40,7 @@
     --paper: #0e1416; --sheet: #121a1c; --ink: #e4ebe8; --muted: #95a39e; --pending: #64716c;
     --rule: #233033; --veil: #1d282a; --lapis: #6fb0c4; --lapis-ink: #0b1517; --gilt: #d2b066;
     --ok: #69bd8b; --ok-bg: #173323; --check: #e2a24a; --check-bg: #3a2c14; --miss: #f07b7b; --miss-bg: #3d1d1e;
-    --unclear: #84939a; --cursor-bg: #1b2a30; --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 24px rgb(0 0 0 / .35);
+    --unclear: #84939a; --cursor-bg: #1b2a30; --cursor-fill: #3b3322; --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 24px rgb(0 0 0 / .35);
     color-scheme: dark;
   }
 }
@@ -47,7 +48,7 @@
   --paper: #0e1416; --sheet: #121a1c; --ink: #e4ebe8; --muted: #95a39e; --pending: #64716c;
   --rule: #233033; --veil: #1d282a; --lapis: #6fb0c4; --lapis-ink: #0b1517; --gilt: #d2b066;
   --ok: #69bd8b; --ok-bg: #173323; --check: #e2a24a; --check-bg: #3a2c14; --miss: #f07b7b; --miss-bg: #3d1d1e;
-  --unclear: #84939a; --cursor-bg: #1b2a30; --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 24px rgb(0 0 0 / .35);
+  --unclear: #84939a; --cursor-bg: #1b2a30; --cursor-fill: #3b3322; --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 24px rgb(0 0 0 / .35);
   color-scheme: dark;
 }
 
@@ -105,8 +106,10 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-b
 
 .w { position: relative; z-index: 1; color: var(--pending); border-radius: .28em; padding: 0 .07em; transition: color .25s ease-out, background-color .25s ease-out; cursor: pointer; text-decoration-skip-ink: none; }
 /* the reading light: glides under the word you are on */
-.glide { position: absolute; left: 0; top: 0; z-index: 0; border-radius: .3em; background: var(--cursor-bg); box-shadow: inset 0 -.11em 0 var(--gilt); pointer-events: none; opacity: 0; transition: transform .2s cubic-bezier(.25,.8,.3,1), width .2s cubic-bezier(.25,.8,.3,1), height .2s, opacity .25s; will-change: transform; }
-@media (prefers-reduced-motion: reduce) { .glide { transition: opacity .2s; } }
+.glide { position: absolute; left: 0; top: 0; z-index: 0; border-radius: .3em; background: var(--cursor-bg); box-shadow: inset 0 -.11em 0 var(--gilt); pointer-events: none; opacity: 0; transition: transform .12s cubic-bezier(.2,.9,.3,1), width .12s cubic-bezier(.2,.9,.3,1), height .12s, opacity .2s; will-change: transform; }
+/* the word being said fills in from the right at the reciter's pace (karaoke) */
+.glide .fill { position: absolute; top: 0; bottom: .11em; right: 0; width: 0; border-radius: inherit; background: var(--cursor-fill); }
+@media (prefers-reduced-motion: reduce) { .glide { transition: opacity .2s; } .glide .fill { display: none; } }
 .memorize .glide { opacity: 0 !important; }
 .w:hover { background: var(--veil); }
 .w.s1, .w.s6 { color: var(--ink); }

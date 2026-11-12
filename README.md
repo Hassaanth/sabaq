@@ -82,6 +82,15 @@ going on, e.g. a long madd). Measured on Al-Mulk 1–5 at phone CPU speed (word 
 | 2.2x faster (1.7 words/s, hadr) | 0.4 s | 0.6–0.7 s | 60/60 in 6 of 8 runs |
 
 Most of what is left is the model itself: it writes a word once most of it has been said (~0.25–0.4 s in).
+Tried and measured: reading the model's raw per-frame probabilities (run directly with onnxruntime) to notice the
+next expected word's start sooner, as reading-tutor and lyrics-following systems do. With this model it gained
+0.03 s on average (Al-Mulk 1–5): its probabilities only rise once it commits to a word, so it was not adopted.
+No streaming Arabic model usable for a paid app has less delay (the open ones look ~1 s ahead or are non-commercial).
+
+**Between confirmations** the word being said fills in (right to left, karaoke style) at the reciter's own pace,
+learnt from each step from one word to the next. It stops at 85% and waits (a long madd, a pause); the highlight
+moves to the next word only once it is heard. The microphone is captured with an AudioWorklet (audio every ~21 ms,
+nothing lost while the page is busy), with the older ScriptProcessor as the fallback.
 At 2.5x and beyond the (time-stretched) test audio itself gets garbled. A double-check of a suspected mistake
 (~2 s) no longer holds up following the words after it.
 Credits: NVIDIA (CC-BY-4.0; int8 export by OmarrGhorab/openbot-personal), Tarteel AI (Apache-2.0).

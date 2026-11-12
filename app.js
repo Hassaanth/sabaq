@@ -26,8 +26,49 @@
   // One soft highlight that glides from word to word (instead of a box blinking on each word in turn)
   const glide = document.createElement('span');
   glide.className = 'glide'; glide.setAttribute('aria-hidden', 'true');
+  // The word being said fills in (right to left, as it is read) at the reciter's own pace, like karaoke captions,
+  // so the page moves with the voice between the moments a word is confirmed. It never fills completely and never
+  // moves on by itself: the next word is highlighted only once it is heard. It waits while the reciter is silent
+  // or holds a long madd. Pace: seconds per letter, learnt from each step from one word to the next.
+  const fill = document.createElement('span');
+  fill.className = 'fill'; glide.append(fill);
+  const pace = { perLetter: 0.12, p: -1, at: 0, dur: 0, startedAt: 0, frozen: false, w: 0 };
+  const FILL_TO = 0.85;
+  function startFill(sp) {
+    fill.style.transition = 'none'; fill.style.width = '0'; pace.frozen = false; pace.w = 0;
+    if (!sp) { pace.p = -1; return; }
+    const p = +sp.dataset.p, now = performance.now();
+    if (pace.p >= 0 && p === pace.p + 1) {
+      const dt = (now - pace.at) / 1000, L = Math.max(2, M.keys[pace.p].length);
+      if (dt > 0.12 && dt < 3) pace.perLetter = Math.min(0.3, Math.max(0.035, 0.7 * pace.perLetter + 0.3 * dt / L));
+    }
+    pace.p = p; pace.at = now;
+    pace.dur = Math.max(0.25, Math.max(2, M.keys[p].length) * pace.perLetter);
+    runFill(0, pace.dur);
+  }
+  function runFill(from, secs) {
+    fill.style.transition = 'none'; fill.style.width = (from * 100).toFixed(1) + '%';
+    void fill.offsetWidth;
+    fill.style.transition = 'width ' + Math.max(0.05, secs).toFixed(2) + 's cubic-bezier(.3,.6,.5,1)';
+    fill.style.width = (FILL_TO * 100) + '%';
+    pace.startedAt = performance.now(); pace.from = from;
+  }
+  // silence (the reciter stopped, or is thinking): the fill waits where it is, and goes on when the voice does
+  setInterval(() => {
+    if (pace.p < 0 || Input.kind !== 'model' || !ModelMic.on) return;
+    const quiet = !ModelMic.inSpeech || ModelMic.silence >= 200;
+    if (quiet && !pace.frozen) {
+      const gw = glide.getBoundingClientRect().width || 1;
+      pace.w = Math.min(FILL_TO, fill.getBoundingClientRect().width / gw);
+      fill.style.transition = 'none'; fill.style.width = (pace.w * 100).toFixed(1) + '%'; pace.frozen = true;
+    } else if (!quiet && pace.frozen) {
+      pace.frozen = false;
+      runFill(pace.w, pace.dur * (FILL_TO - pace.w) / FILL_TO);
+    }
+  }, 80);
   let glideAt = null, glideSpan = null;
   function moveGlide(sp) {
+    if (sp !== glideSpan) startFill(sp);
     glideSpan = sp;
     if (!sp) { glide.style.opacity = '0'; glideAt = null; return; }
     const r = sp.getBoundingClientRect(), q = quranEl.getBoundingClientRect();
@@ -895,11 +936,29 @@
       if (a.state !== 'running') { try { await a.resume(); } catch (e) { /* tried */ } }
       a.onstatechange = () => { if (this.on && this.ctx === a && a.state !== 'running' && a.state !== 'closed') a.resume().catch(() => {}); };
       this.src = a.createMediaStreamSource(this.stream);
-      this.node = a.createScriptProcessor(4096, 1, 1); // (2048 drops audio on a busy slow phone)
       this.sink = a.createGain(); this.sink.gain.value = 0;
       this.rs = { ratio: a.sampleRate / 16000, pos: 0, acc: 0, n: 0 };
       this.nonzero = false; this.frames = 0;
-      this.node.onaudioprocess = e => this.onAudio(e.inputBuffer.getChannelData(0));
+      // An AudioWorklet hands the audio over every ~21 ms on the audio thread (nothing is lost while the page is
+      // busy); the older ScriptProcessor only every ~85 ms. The older one stays as the fallback.
+      this.node = null;
+      if (!this.noWorklet && a.audioWorklet && typeof AudioWorkletNode === 'function') {
+        try {
+          if (!a.__sabaqCap) {
+            const code = 'class C extends AudioWorkletProcessor{constructor(){super();this.b=new Float32Array(1024);this.n=0}process(i){const c=i[0]&&i[0][0];if(c){for(let k=0;k<c.length;k++){this.b[this.n++]=c[k];if(this.n===1024){this.port.postMessage(this.b,[this.b.buffer]);this.b=new Float32Array(1024);this.n=0}}}return true}}registerProcessor("sabaq-cap",C);';
+            const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+            await a.audioWorklet.addModule(url); URL.revokeObjectURL(url); a.__sabaqCap = true;
+          }
+          this.node = new AudioWorkletNode(a, 'sabaq-cap', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+          this.node.port.onmessage = e => this.onAudio(e.data);
+          this.capture = 'worklet';
+        } catch (e) { this.node = null; }
+      }
+      if (!this.node) {
+        this.node = a.createScriptProcessor(4096, 1, 1); // (2048 drops audio on a busy slow phone)
+        this.node.onaudioprocess = e => this.onAudio(e.inputBuffer.getChannelData(0));
+        this.capture = 'script';
+      }
       this.src.connect(this.node); this.node.connect(this.sink); this.sink.connect(a.destination);
       // iPhone: the audio engine can come up "interrupted" or deliver only silence once the mic switches it
       // to recording. If no real sound arrives within 2 s, rebuild the path once in a fresh audio context
@@ -913,13 +972,14 @@
       if (this.frames > 0 && this.ctx.state === 'running') return;
       if (this.rebuilt) { toast('The microphone is not sending sound. Close other apps using it, then tap the mic again.', 6000); return; }
       this.rebuilt = true;
+      this.noWorklet = true; // (the rebuild uses the older, proven capture path)
       this.unhook();
       const C = window.AudioContext || window.webkitAudioContext;
       let fresh = null; try { fresh = new C(); } catch (e) { /* none */ }
       if (fresh) await this.connect(fresh);
     },
     unhook() {
-      try { if (this.node) { this.node.onaudioprocess = null; this.node.disconnect(); } if (this.src) this.src.disconnect(); if (this.sink) this.sink.disconnect(); } catch (e) { /* gone */ }
+      try { if (this.node) { this.node.onaudioprocess = null; if (this.node.port) this.node.port.onmessage = null; this.node.disconnect(); } if (this.src) this.src.disconnect(); if (this.sink) this.sink.disconnect(); } catch (e) { /* gone */ }
       if (this.ctx && this.ctx !== actx) { const c = this.ctx; c.onstatechange = null; c.close().catch(() => {}); }
       this.src = this.node = this.sink = null;
     },
@@ -990,7 +1050,7 @@
         while (this.preLen > 16000 * 0.35) this.preLen -= this.pre.shift().length;
         this.run = voiced ? this.run + 1 : 0;
         if (this.run >= 3) {
-          if (window.__asrLog) window.__asrLog.push({ kind: "vad", seg: this.seg + 1, at: performance.now(), text: "speech start, pre " + (this.preLen / 16000).toFixed(2) + "s, ctx " + (this.ctx && this.ctx.baseLatency) + " out " + (this.ctx && this.ctx.outputLatency) }); // dev-only
+          if (window.__asrLog) window.__asrLog.push({ kind: "vad", seg: this.seg + 1, at: performance.now(), text: "speech start (" + this.capture + "), pre " + (this.preLen / 16000).toFixed(2) + "s, ctx " + (this.ctx && this.ctx.baseLatency) + " out " + (this.ctx && this.ctx.outputLatency) }); // dev-only
           this.inSpeech = true; this.seg++; this.silence = 0; this.voicedN = this.run; this.lastPartialLen = 0;
           this.buf = this.pre; this.len = this.preLen; this.pre = []; this.preLen = 0;
           this.lastPartial = performance.now();

@@ -64,9 +64,26 @@ npm start            # http://localhost:8787
 | Tarteel's Whisper base Quran model | 117 / 117 / 117 | ~800 ms / ~1,500 ms | the double-check before a stop |
 
 The FastConformer is the same model family Tarteel runs (NVIDIA NeMo); unlike Whisper, which always processes a
-30-second window and writes text out piece by piece, it reads only the audio you said, in one pass. Highlight
-lag after each word (Al-Mulk 1–5, phone-speed CPU): about 0.5 s typical, against 1.5 s with Whisper. The
+30-second window and writes text out piece by piece, it reads only the audio you said, in one pass. The
 double-check uses a different kind of model, so a stop needs two independent readings to agree.
+
+**Streaming.** While you recite, the phone streams its audio to the server every 80 ms; the server reads the
+newest audio of the phrase whenever its fast model is free (about every 80–100 ms) and sends the words back, so
+no reading waits in a queue going stale. Each live reading gets 0.6 s of faint room noise after the audio: an
+offline model holds back the newest word at the very end of what it hears, and with a little "after" it writes it
+out ~0.2 s sooner and makes up half as many words (measured on Al-Mulk 2–5). The highlight sits on the word being
+said and moves on when the next word is heard starting, never sooner (a word the model already names may still be
+going on, e.g. a long madd). Measured on Al-Mulk 1–5 at phone CPU speed (word end → highlight moves past it):
+
+| Recitation pace | Typical lag | 90% of words within | Words followed |
+|---|---|---|---|
+| Alafasy, normal (0.8 words/s with pauses) | 0.4–0.5 s | 0.8 s | 60/60 |
+| 1.6x faster (1.3 words/s) | 0.3–0.4 s | 0.6–0.7 s | 60/60 |
+| 2.2x faster (1.7 words/s, hadr) | 0.4 s | 0.6–0.7 s | 60/60 in 6 of 8 runs |
+
+Most of what is left is the model itself: it writes a word once most of it has been said (~0.25–0.4 s in).
+At 2.5x and beyond the (time-stretched) test audio itself gets garbled. A double-check of a suspected mistake
+(~2 s) no longer holds up following the words after it.
 Credits: NVIDIA (CC-BY-4.0; int8 export by OmarrGhorab/openbot-personal), Tarteel AI (Apache-2.0).
 
 A page served by the server finds it by itself (it answers `/health`). Any other page can be pointed at one with
@@ -102,7 +119,8 @@ pauses, restarts, skipped and wrong words, and taps on the mic, and records what
 
 Tests:
 ```
-node tests/engine.test.js     # 67 scenario tests, incl. teacher mode and moving on
+node tests/engine.test.js     # 90 scenario tests, incl. teacher mode, moving on, fast joined words
+node tests/sessions.cjs       # realistic sessions through the real mic path (needs Playwright; see the file)
 node tests/stress.test.js     # 60,000-word noisy-recitation simulation
 ```
 
@@ -129,6 +147,10 @@ low two-note sound plays (plus a vibration on phones). Then:
 2. **If you stay silent, or say it wrong, a qari recites the correct word.**
 3. **Then repeat the word, or the ayah from its start, and move on.** Say it wrong again and the qari
    corrects you again; after 3 wrong tries it lets you move on (the word stays marked for review).
+
+**Mistakes stay on the page.** A word you were stopped on turns red. Once you put it right it turns green with a
+red line under it and a ✓ ("mistake, then fixed"), so you can see afterwards where you slipped. A word the qari
+had to give you that you then went past stays red ("needed help"); both are in the review list at the end.
 
 A retry the recogniser hears slightly differently is accepted, as long as it isn't the same mistake again.
 

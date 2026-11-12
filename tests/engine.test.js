@@ -337,6 +337,32 @@ console.log('Recite from anywhere (auto-detect)');
   const w = new E.Tracker(M); w.hint = [M.surahs[17].start, M.surahs[17].end];
   for (const x of words(6, 1, 1)) w.feed([x]);
   check('...but reciting another surah still finds that one', M.sOf[Math.max(0, w.c - 1)] === 5, { s: M.sOf[Math.max(0, w.c - 1)] + 1 });
+  // starting the open surah from the top: placed after its first two words (no waiting for a third)
+  const f = new E.Tracker(M); f.strict = true; f.hint = [M.surahs[66].start, M.surahs[66].end];
+  for (const x of words(67, 1, 1).slice(0, 2)) f.feed([x]);
+  const h = f.clone(); h.feed(['بيده']);
+  check('opening the open surah: placed after two words', f.c >= M.pos(67, 1) && h.c === M.pos(67, 1) + 3 && h.stopped < 0, { c: f.c - M.pos(67, 1), h: h.c - M.pos(67, 1) });
+  const g = new E.Tracker(M); g.hint = [M.surahs[66].start, M.surahs[66].end];
+  for (const x of words(25, 1, 1)) g.feed([x]);
+  check('...and a different surah with the same two opening words still goes there', M.sOf[Math.max(0, g.c - 1)] === 24, { s: M.sOf[Math.max(0, g.c - 1)] + 1 });
+  const b2 = new E.Tracker(M); b2.hint = [M.surahs[66].start, M.surahs[66].end];
+  for (const x of ['اعوذ', 'بالله', 'من', 'الشيطان', 'الرجيم', 'بسم', 'الله', 'الرحمن', 'الرحيم', ...words(67, 1, 1).slice(0, 2)]) b2.feed([x]);
+  check('...also after the isti\'adha and bismillah', b2.c >= M.pos(67, 1) && b2.c <= M.pos(67, 1) + 2, { c: b2.c - M.pos(67, 1) });
+}
+{
+  // recited fast, two words run together with the second blurred too: من تفاوت -> "انتفوت"
+  const t = new E.Tracker(M); t.strict = true; t.setPosition(M.pos(67, 3) + 9);
+  t.feed(['الرحمن', 'انتفوت', 'فارجع', 'البصر']); t.flush();
+  check('fast joined words (من تفاوت heard as one) do not stop you', t.stopped < 0 && t.c === M.pos(67, 3) + 14, { stopped: t.stopped, c: t.c - M.pos(67, 3) });
+}
+{
+  // a word you were stopped on stays marked: fixed when you then say it right
+  const t = new E.Tracker(M); t.strict = true; t.setPosition(M.pos(67, 1));
+  const a1 = words(67, 1, 1);
+  t.feed([a1[0], a1[1], 'بيدي', a1[3]]); t.flush();
+  const p = M.pos(67, 1) + 2, was = t.stopped === p;
+  t.feed([a1[2], a1[3], a1[4]]);
+  check('the word you were stopped on stays marked as a mistake you fixed', was && t.flagged.has(p) && t.fixed.has(p) && t.state[p] === CORRECT, { was, flagged: t.flagged.has(p), fixed: t.fixed.has(p), st: t.state[p] });
 }
 
 console.log('Continuity');

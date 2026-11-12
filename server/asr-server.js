@@ -40,6 +40,8 @@ async function read(p, audio, extra) {
 }
 // model files are cached outside the app folder (HF_CACHE to choose; a sandboxed folder can hide files from the runtime)
 env.cacheDir = process.env.HF_CACHE || path.join(os.tmpdir(), 'sabaq-hf-cache');
+// (checked: neither word is in the Quran; شكرا is, 34:13, so it stays)
+const NOT_QURAN = new Set(['نهاية', 'الدرس']);
 const CORES = os.cpus().length;
 const THREADS = +process.env.THREADS || Math.max(1, Math.min(4, CORES >> 1 || 1));
 
@@ -70,7 +72,15 @@ async function loadCtc() {
     modelConfig: { nemoCtc: { model: path.join(CTC_DIR, 'model.int8.onnx') }, tokens: path.join(CTC_DIR, 'tokens.txt'), numThreads: THREADS, provider: 'cpu', debug: 0 },
     decodingMethod: 'greedy_search',
   });
-  const fn = async audio => { const st = rec.createStream(); st.acceptWaveform({ samples: audio, sampleRate: 16000 }); await rec.decodeAsync(st); return rec.getResult(st).text || ''; };
+  // (with how long ago the last letter was heard: 0.3 s later with no new letter, the last word is finished,
+  // so the phone can move the highlight on at once instead of waiting for the next word)
+  const fn = async audio => {
+    const st = rec.createStream(); st.acceptWaveform({ samples: audio, sampleRate: 16000 }); await rec.decodeAsync(st);
+    const r = rec.getResult(st), ts = r.timestamps || [];
+    // (on silence or noise the model sometimes writes "نهاية الدرس" / "شكرا الدرس" ("end of the lesson",
+    // "thanks, the lesson"): words from its training data; the ones not in the Quran are dropped)
+    return { text: (r.text || '').split(/\s+/).filter(w => w && !NOT_QURAN.has(w)).join(' '), gap: ts.length ? Math.max(0, audio.length / 16000 - ts[ts.length - 1]) : null };
+  };
   await fn(new Float32Array(16000)); // warm up
   return fn;
 }
@@ -100,6 +110,7 @@ const laneFor = kind => (LANES >= 2 ? (kind === 'verify' ? 'slow' : 'fast') : 'o
 
 const queue = [];
 const busy = { fast: false, slow: false, one: false };
+const lives = new Set(); // connections streaming a phrase as it is recited
 function pump() {
   if (!read$.fast || !read$.slow) return;
   for (const lane of LANES >= 2 ? ['fast', 'slow'] : ['one']) {
@@ -107,16 +118,36 @@ function pump() {
     // phrase readings and double-checks first, then live readings
     let i = queue.findIndex(j => laneFor(j.kind) === lane && j.kind !== 'partial');
     if (i < 0) i = queue.findIndex(j => laneFor(j.kind) === lane);
-    if (i >= 0) run(queue.splice(i, 1)[0], lane);
+    if (i >= 0) { run(queue.splice(i, 1)[0], lane); continue; }
+    if (lane === 'fast') { const job = liveJob(); if (job) run(job, lane); }
   }
+}
+// The newest audio of a streamed phrase, if 80 ms more of it arrived since its last reading (or a pause began:
+// its last word is then complete), with the faint noise after it (see below)
+function liveJob() {
+  for (const ws of lives) {
+    const L = ws.live;
+    if (!L || ws.readyState !== 1) { lives.delete(ws); continue; }
+    const s = ws.segs.get(L.seg);
+    if (!s || s.len < 8000) continue;
+    if (!(s.len - L.done >= 1280 || (L.whole && !L.doneWhole && s.len > L.done))) continue;
+    const audio = new Float32Array(s.len + PAD); let o = 0;
+    for (const p of s.parts) { audio.set(p, o); o += p.length; }
+    audio.set(NOISE, s.len);
+    L.done = s.len; L.doneWhole = L.whole;
+    // (round robin between connections)
+    lives.delete(ws); lives.add(ws);
+    return { ws, kind: 'partial', seg: L.seg, whole: L.whole, pad: PAD, audio };
+  }
+  return null;
 }
 async function run(job, lane) {
   busy[lane] = true;
   const t = Date.now();
-  let text = '', error;
-  try { text = await modelFor(job.kind)(job.audio); } catch (e) { error = String((e && e.message) || e); }
+  let text = '', gap = null, error;
+  try { const r = await modelFor(job.kind)(job.audio); if (typeof r === 'string') text = r; else { text = r.text; gap = r.gap == null ? null : Math.max(0, r.gap - (job.pad || 0) / 16000); } } catch (e) { error = String((e && e.message) || e); }
   busy[lane] = false;
-  if (job.ws.readyState === 1) job.ws.send(JSON.stringify({ type: 'result', id: job.id, kind: job.kind, seg: job.seg, text, error, ms: Date.now() - t, secs: job.audio.length / 16000 }));
+  if (job.ws.readyState === 1) job.ws.send(JSON.stringify({ type: 'result', id: job.id, kind: job.kind, seg: job.seg, text, gap, whole: job.whole, len: job.audio.length - (job.pad || 0), error, ms: Date.now() - t, secs: (job.audio.length - (job.pad || 0)) / 16000 }));
   pump();
 }
 loading.then(pump);
@@ -127,7 +158,7 @@ const FILES = new Set(['index.html', 'app.js', 'engine.js', 'quran-data.js', 'as
 const server = http.createServer((req, res) => {
   let name = decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '') || 'index.html';
   // (the Sabaq website on GitHub Pages checks this from its own address: allow it)
-  if (name === 'health') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'cross-origin-resource-policy': 'cross-origin' }); res.end(JSON.stringify({ ready: !!(read$.fast && read$.slow), warm, queued: queue.length, models: NAMES })); return; }
+  if (name === 'health') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'cross-origin-resource-policy': 'cross-origin' }); res.end(JSON.stringify({ ready: !!(read$.fast && read$.slow), warm, queued: queue.length, models: NAMES, stream: LANES >= 2 ? 3 : 2 })); return; }
   if (!FILES.has(name)) { res.writeHead(404); res.end('not found'); return; }
   // (no cross-origin isolation headers: Safari would then refuse the in-browser fallback model's code)
   res.writeHead(200, { 'content-type': TYPES[path.extname(name)], 'cache-control': 'no-cache' });
@@ -138,11 +169,14 @@ const server = http.createServer((req, res) => {
 //   {t:'chunk', seg} + pcm         more audio of phrase `seg` (each sample is sent once)
 //   {t:'run', id, kind, seg, len}  read phrase `seg` from its start up to `len` samples (live or final)
 //   {t:'full', id, kind, seg} + pcm read this audio as it is (the double-check, with its own context)
+const PAD = Math.round(16000 * (process.env.PAD != null ? +process.env.PAD : 0.6));
+const NOISE = new Float32Array(PAD); { let x = 12345; for (let i = 0; i < PAD; i++) { x = (x * 1103515245 + 12345) >>> 0; NOISE[i] = (x / 4294967296 - 0.5) * 0.003; } }
 const toFloat = (pcm) => { const s = new Int16Array(pcm.buffer, pcm.byteOffset, pcm.length >> 1); const a = new Float32Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s[i] / 32768; return a; };
 const wss = new WebSocketServer({ server, path: '/asr', maxPayload: 16000 * 2 * 32 + 4096 });
 wss.on('connection', ws => {
   const segs = new Map(); // seg -> { parts: Float32Array[], len }
-  const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true, lanes: LANES, models: NAMES }));
+  ws.segs = segs; ws.live = null;
+  const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true, lanes: LANES, models: NAMES, stream: LANES >= 2 ? 3 : 2 }));
   if (read$.fast && read$.slow) hello(); else loading.then(hello);
   ws.on('message', (data, isBinary) => {
     if (!isBinary) return;
@@ -154,22 +188,40 @@ wss.on('connection', ws => {
       let s = segs.get(head.seg);
       if (!s) { s = { parts: [], len: 0 }; segs.set(head.seg, s); while (segs.size > 8) segs.delete(segs.keys().next().value); }
       const a = toFloat(pcm); s.parts.push(a); s.len += a.length;
+      // {live: 1}: the phrase being recited now, streamed; whole: its audio ends in a short pause
+      if (head.live && LANES >= 2) {
+        if (!ws.live || ws.live.seg !== head.seg) { if (ws.live && head.seg < ws.live.seg) return; ws.live = { seg: head.seg, done: 0, whole: false, doneWhole: false }; }
+        ws.live.whole = !!head.whole;
+        lives.add(ws); pump();
+      }
       return;
     }
     let audio;
+    // the phrase's reading: it is no longer streamed
+    if (head.kind === 'final' && ws.live && ws.live.seg <= head.seg) ws.live = null;
     if (head.t === 'full') audio = toFloat(pcm);
     else {
       const s = segs.get(head.seg); if (!s) return;
       const len = Math.min(head.len || s.len, s.len);
-      audio = new Float32Array(len); let o = 0;
+      // A live reading gets 0.6 s of faint room noise after the audio: an offline model holds back the newest word
+      // at the very end of what it hears; with a little "after" it writes it out ~0.2 s sooner, and makes up half as
+      // many words at the end (measured on Al-Mulk 2-5: 6.5% of readings instead of 13.5%).
+      const pad = head.kind === 'partial' && LANES >= 2 ? PAD : 0;
+      audio = new Float32Array(len + pad); let o = 0;
       for (const p of s.parts) { if (o >= len) break; const take = Math.min(p.length, len - o); audio.set(p.subarray(0, take), o); o += take; }
+      if (pad) audio.set(NOISE.subarray(0, pad), len);
+      head.pad = pad;
     }
-    // a newer live reading of the same phrase replaces one still waiting (it would be stale anyway)
-    if (head.kind === 'partial') { const i = queue.findIndex(j => j.ws === ws && j.kind === 'partial'); if (i >= 0) queue.splice(i, 1); }
-    queue.push({ ws, id: head.id, kind: head.kind, seg: head.seg, audio });
+    // a newer live reading replaces one still waiting (it would be stale anyway); the phone is told, so it
+    // can keep several readings on their way (the next one is always already here when the model is free)
+    if (head.kind === 'partial') {
+      const i = queue.findIndex(j => j.ws === ws && j.kind === 'partial');
+      if (i >= 0) { const old = queue.splice(i, 1)[0]; ws.send(JSON.stringify({ type: 'result', kind: 'partial', seg: old.seg, dropped: true })); }
+    }
+    queue.push({ ws, id: head.id, kind: head.kind, seg: head.seg, whole: head.whole, pad: head.pad || 0, audio });
     pump();
   });
-  ws.on('close', () => { for (let i = queue.length - 1; i >= 0; i--) if (queue[i].ws === ws) queue.splice(i, 1); });
+  ws.on('close', () => { lives.delete(ws); for (let i = queue.length - 1; i >= 0; i--) if (queue[i].ws === ws) queue.splice(i, 1); });
 });
 
 server.listen(PORT, () => console.log(`Sabaq speech server on http://localhost:${PORT} (WebSocket /asr)`));

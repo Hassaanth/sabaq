@@ -18,6 +18,34 @@
     const buf = await packs[s], off = A.words[s][i * 2], len = A.words[s][i * 2 + 1];
     return ctx.decodeAudioData(buf.slice(off, off + len));
   }
+  // Faster (or slower) recitation, same voice: WSOLA time-stretch (pitch kept), for testing fast reciters.
+  //   { url, from, to, rate: 1.6 } plays that part 1.6x as fast
+  function stretch(buf, from, dur, rate) {
+    const sr = buf.sampleRate, x = buf.getChannelData(0).subarray(Math.floor(from * sr), Math.floor((from + dur) * sr));
+    const N = Math.round(0.04 * sr), Hs = N >> 1, tol = Math.round(0.012 * sr);
+    const outLen = Math.floor(x.length / rate), y = new Float32Array(outLen + N), wsum = new Float32Array(outLen + N);
+    const win = new Float32Array(N); for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N);
+    let prev = 0; // input position of the previous frame
+    for (let o = 0; o + N < outLen + N; o += Hs) {
+      const nominal = Math.round(o * rate);
+      let best = nominal;
+      if (o > 0) {
+        // the frame that best continues the previous one (its natural next hop), within the tolerance
+        const want = prev + Hs; let bc = -Infinity;
+        for (let d = -tol; d <= tol; d += 2) {
+          const p = nominal + d; if (p < 0 || p + N > x.length) continue;
+          let c = 0; for (let i = 0; i < N; i += 4) { const q = want + i; if (q < x.length) c += x[p + i] * x[q]; }
+          if (c > bc) { bc = c; best = p; }
+        }
+      }
+      if (best + N > x.length) break;
+      for (let i = 0; i < N; i++) { y[o + i] += x[best + i] * win[i]; wsum[o + i] += win[i]; }
+      prev = best;
+    }
+    const out = ctx.createBuffer(1, outLen, sr), ch = out.getChannelData(0);
+    for (let i = 0; i < outLen; i++) ch[i] = wsum[i] > 1e-3 ? y[i] / wsum[i] : 0;
+    return out;
+  }
   let queueEnd = 0; // audio-clock time when everything scheduled so far has played
   window.__play = async items => {
     if (ctx.state !== 'running') await ctx.resume();
@@ -26,12 +54,13 @@
     let t = Math.max(ctx.currentTime + 0.05, queueEnd);
     for (const it of items) {
       if (it.silence) { t += it.silence / 1000; continue; }
-      const buf = it.url ? await decodeUrl(it.url) : await word(...it.word);
+      let buf = it.url ? await decodeUrl(it.url) : await word(...it.word);
+      // { url, from, to } in ms plays just that part (e.g. exact words cut from a full-surah recitation)
+      let from = (it.from || 0) / 1000, dur = it.to != null ? (it.to - (it.from || 0)) / 1000 : buf.duration - from;
+      if (it.rate && it.rate !== 1) { buf = stretch(buf, from, dur, it.rate); from = 0; dur = buf.duration; }
       // (decoding can take seconds the first time: never schedule into the past, which would shorten a pause)
       if (t < ctx.currentTime + 0.05) { const late = ctx.currentTime + 0.05 - t; t += late; }
       const src = ctx.createBufferSource(); src.buffer = buf; src.connect(dest);
-      // { url, from, to } in ms plays just that part (e.g. exact words cut from a full-surah recitation)
-      const from = (it.from || 0) / 1000, dur = it.to != null ? (it.to - (it.from || 0)) / 1000 : buf.duration - from;
       src.start(t, from, dur);
       window.__played = window.__played || []; window.__played.push({ at: t, url: it.url, from: it.from || 0, to: it.to }); // (for lag measurements)
       t += dur + (it.gap || 0) / 1000;

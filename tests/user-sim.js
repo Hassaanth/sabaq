@@ -9,8 +9,8 @@
 (function () {
   const timings = {};
   async function surah(s) {
-    if (timings[s]) return timings[s];
-    const j = await fetch('https://api.qurancdn.com/api/qdc/audio/reciters/7/audio_files?chapter=' + s + '&segments=true').then(r => r.json());
+    const key = s + '/' + (window.__simReciter || 7); if (timings[key]) return timings[key];
+    const j = await fetch('https://api.qurancdn.com/api/qdc/audio/reciters/' + (window.__simReciter || 7) + '/audio_files?chapter=' + s + '&segments=true').then(r => r.json());
     const f = j.audio_files[0], ayahs = {};
     // by word number (a reciter may repeat words: Alafasy says 18:2 words 7-8 twice): first start, last end
     for (const v of f.verse_timings) {
@@ -18,7 +18,7 @@
       for (const x of v.segments) { if (x.length < 3) continue; const i = x[0] - 1; if (!words[i]) words[i] = [x[1], x[2]]; else words[i][1] = Math.max(words[i][1], x[2]); }
       ayahs[+v.verse_key.split(':')[1]] = words;
     }
-    return (timings[s] = { url: f.audio_url, ayahs });
+    return (timings[key] = { url: f.audio_url, ayahs });
   }
   function parse(it) {
     if (typeof it !== 'string') return it;
@@ -59,7 +59,7 @@
       note('says ' + it.s + ':' + it.a + (it.w ? ' words ' + w1 + '-' + w2 : ''));
       // a person who skips or swaps a word still finishes the word before it: a short natural gap at a jump
       const jump = lastEnd != null && Math.abs(segs[w1 - 1][0] - lastEnd) > 40;
-      await __play([...(jump ? [{ silence: 120 }] : []), { url: t.url, from: segs[w1 - 1][0], to: segs[w2 - 1][1] }]);
+      await __play([...(jump ? [{ silence: 120 }] : []), { url: t.url, from: segs[w1 - 1][0], to: segs[w2 - 1][1], rate: it.rate || window.__simRate || 1 }]);
       lastEnd = segs[w2 - 1][1];
     }
   }
@@ -78,7 +78,7 @@
   }
   // Highlight lag: recite ayahs straight through and measure, for every word, how long after it was said
   // (end of the word in the audio) the highlight moved past it. Timed on the audio clock.
-  async function lag(s, a1, a2) {
+  async function lag(s, a1, a2, rate = 1) {
     const t = await surah(s), ctx = window.__fakeCtx, passed = new Map();
     // (a DOM observer fires the moment the highlight moves; timers are throttled in a background tab)
     const seen = () => { const c = document.querySelector('.w.cur'); const p = c ? +c.dataset.p : -1; for (let q = p - 1; q >= 0 && !passed.has(q); q--) passed.set(q, ctx.currentTime); };
@@ -86,13 +86,13 @@
     const watch = Promise.resolve(); let on = true;
     const first = t.ayahs[a1][0][0], last = t.ayahs[a2][t.ayahs[a2].length - 1][1];
     window.__played = [];
-    await __play([{ url: t.url, from: first, to: last }, { silence: 6000 }]);
+    await __play([{ url: t.url, from: first, to: last, rate }, { silence: 6000 }]);
     on = false; await watch; mo.disconnect();
     const start = window.__played[0].at, base = M_pos(s, a1), lags = [];
     let i = 0;
-    for (let a = a1; a <= a2; a++) for (const [, end] of t.ayahs[a]) { const p = base + i++; const said = start + (end - first) / 1000; lags.push(passed.has(p) ? passed.get(p) - said : null); }
+    for (let a = a1; a <= a2; a++) for (const [, end] of t.ayahs[a]) { const p = base + i++; const said = start + (end - first) / 1000 / rate; lags.push(passed.has(p) ? passed.get(p) - said : null); }
     const ok = lags.filter(x => x != null).sort((x, y) => x - y), q = f => ok.length ? ok[Math.min(ok.length - 1, Math.floor(f * ok.length))].toFixed(1) + 's' : '-';
-    return { words: lags.length, followed: ok.length, median: q(0.5), p90: q(0.9), max: q(0.999), lags: lags.map(x => x == null ? 'x' : x.toFixed(1)).join(' ') };
+    return { pace: (lags.length / ((last - first) / 1000 / rate)).toFixed(2) + ' words/s', words: lags.length, followed: ok.length, median: q(0.5), p90: q(0.9), max: q(0.999), lags: lags.map(x => x == null ? 'x' : x.toFixed(1)).join(' ') };
   }
   // position of a word in the whole Quran (first word of ayah a of surah s), from the page's own data
   function M_pos(s, a) { let p = 0; const Q = window.QURAN; for (let k = 0; k < s - 1; k++) for (const ay of Q[k].a) p += ay[0].split(' ').length; for (let k = 0; k < a - 1; k++) p += Q[s - 1].a[k][0].split(' ').length; return p; }

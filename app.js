@@ -111,12 +111,15 @@
     else if (view === T) v = s;
     else if (T.state[p] !== PENDING) v = T.state[p];
     else v = s === PENDING ? PENDING : TENTATIVE; // preview words are not settled: show progress, never a mistake
-    if (v === CORRECT && T.fixed.has(p)) v += 10;
+    // (tens: 1 fixed, 2 stopped here now, 4 needed the qari: a mistake that stays marked)
+    if ((v === CORRECT || v === TENTATIVE) && T.fixed.has(p)) v = CORRECT + 10;
+    else if (T.flagged.has(p) && p !== T.stopped && (v === UNCLEAR || v === PENDING || v === TENTATIVE)) v = UNCLEAR + 40;
     if (p === T.stopped) v += 20;
     return v;
   }
   function classFor(v) {
-    return 'w s' + (v % 10) + (v >= 20 ? ' stopw' : v >= 10 ? ' fx' : '');
+    const f = (v / 10) | 0;
+    return 'w s' + (v % 10) + (f & 2 ? ' stopw' : f & 1 ? ' fx' : '') + (f & 4 ? ' hlp' : '');
   }
 
   function anchorOf(view) {
@@ -425,11 +428,14 @@
     clearTimeout(idleTimer);
     if (T.qi < T.q.length) idleTimer = setTimeout(() => { if (!P) { T.flush(); handleEvents(); render(); } }, 1100);
   }
-  function preview(text, fromModel) {
-    if (E.tokenize(text).length) clearTimeout(idleTimer); // only real new speech postpones the end-of-phrase check
+  // The highlight sits on the word being said: the word after the last one heard in full. It moves on when the
+  // next word is heard starting, never sooner: a word the model already names (it often names a word from its
+  // first sound) may still be going on (a long madd), so the word being said (tail) only keeps the phrase open.
+  function preview(text, fromModel, tail) {
+    if (E.tokenize(text).length || tail) clearTimeout(idleTimer); // only real new speech postpones the end-of-phrase check
     if (Qari.gatedAny() && !fromModel) { phraseSkip = Math.max(phraseSkip, E.tokenize(text).length); return; }
     const words = E.tokenize(text).slice(phraseSkip);
-    if (!words.length) { if (P) { P = null; render(); } return; }
+    if (!words.length) { P = null; render(); return; }  // (render coalesces: cheap)
     P = T.clone();
     P.feed(words);
     // (not on the model's live guesses: they are often garbled mid-phrase; its final result decides)
@@ -476,10 +482,11 @@
 
   // Where, in a reading of a phrase, the words already locked in (from earlier readings of it) end: the
   // position after the best match of their last words, near where counting would put it. -1: not found.
-  function alignAfter(words, locked) {
+  // (wide: anywhere in the reading, for a second reading that starts with the end of the previous phrase)
+  function alignAfter(words, locked, wide) {
     const n = locked.length; if (!n) return 0;
     let best = -1, bestScore = 0;
-    for (let j = Math.max(1, n - 3); j <= Math.min(words.length, n + 3); j++) {
+    for (let j = wide ? 1 : Math.max(1, n - 3); j <= (wide ? words.length : Math.min(words.length, n + 3)); j++) {
       // (the same word as the tracker sees it: a reading may spell it a little differently, زين / زينا)
       let sc = 0; for (let k = 1; k <= Math.min(3, n, j); k++) { const a = words[j - k], b = locked[n - k]; if (a === b || E.sim(a, b) >= 0.7) sc++; else break; }
       if (sc > bestScore || (sc && sc === bestScore && Math.abs(j - n) < Math.abs(best - n))) { best = j; bestScore = sc; }
@@ -743,7 +750,13 @@
       const done = this.sent.get(m.seg) || 0;
       if (m.audio.length > done) { this.send({ t: 'chunk', seg: m.seg }, m.audio.subarray(done)); this.sent.set(m.seg, m.audio.length); }
       while (this.sent.size > 8) this.sent.delete(this.sent.keys().next().value);
-      this.send({ t: 'run', kind: m.kind, seg: m.seg, len: m.audio.length });
+      this.send({ t: 'run', kind: m.kind, seg: m.seg, len: m.audio.length, whole: !!m.whole });
+    }
+    // streaming: more audio of the phrase being recited (the server reads it as it comes)
+    sendChunk(seg, pcm, whole) {
+      this.send({ t: 'chunk', seg, live: 1, whole: !!whole }, pcm);
+      this.sent.set(seg, (this.sent.get(seg) || 0) + pcm.length);
+      while (this.sent.size > 8) this.sent.delete(this.sent.keys().next().value);
     }
     terminate() { this.ended = true; try { this.ws.close(); } catch (e) { /* gone */ } }
   }
@@ -779,7 +792,7 @@
     worker: null, ready: false, failed: false, files: {}, stream: null, src: null, node: null, sink: null,
     on: false, seg: 0, inSpeech: false, buf: [], len: 0, pre: [], preLen: 0, run: 0, silence: 0,
     floor: 0.004, busy: false, finals: [], partial: null, lastPartial: 0, rs: null, frame: [], frameLen: 0, ms: [],
-    busyKind: '', slowCached: false, chunkCached: 7, busyP: false, busyF: false, lanes: 1, pendingFinal: new Set(), cutNow: false, cutAt: 0, cutMid: new Set(), costA: 1000, perSec: [], agree: { seg: -1, prev: [], done: 0, locked: [] }, judgedSeg: 0, threads: 1, chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
+    busyKind: '', slowCached: false, chunkCached: 7, busyP: false, unsent: [], unsentLen: 0, streamSeg: -1, inflightP: 0, srvStream: 0, lastLive: { seg: -1, len: 0 }, judging: null, busyF: false, lanes: 1, pendingFinal: new Set(), cutNow: false, cutAt: 0, cutMid: new Set(), costA: 1000, perSec: [], agree: { seg: -1, prev: [], done: 0, locked: [] }, judgedSeg: 0, threads: 1, chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
 
     loadPct() {
       let l = 0, t = 0;
@@ -792,7 +805,7 @@
         this.remote = true;
         this.worker = new RemoteASR(asrServer, wasOpen => {
           // the server went away (or never answered): carry on with the model in the browser
-          this.worker = null; this.remote = false; this.ready = false; this.busy = false; this.busyKind = ''; this.busyP = this.busyF = false; this.pendingFinal.clear();
+          this.worker = null; this.remote = false; this.ready = false; this.busy = false; this.busyKind = ''; this.busyP = this.busyF = false; this.inflightP = 0; this.pendingFinal.clear();
           if (wasOpen) toast('Lost the speech server. Continuing with the model on this device.', 5000);
           this.init(true); renderStatus();
         });
@@ -821,28 +834,34 @@
         if (m.total) this.files[m.file] = { loaded: m.loaded, total: m.total };
         if (this.on) renderStatus();
       } else if (m.type === 'ready') {
-        this.updateSpeed(); this.ready = true; this.threads = m.threads || 1; this.lanes = m.lanes || 1; this.models = m.models || null; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
+        this.updateSpeed(); this.ready = true; this.threads = m.threads || 1; this.lanes = m.lanes || 1; this.srvStream = m.stream || 0; this.inflightP = 0; this.models = m.models || null; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
       } else if (m.type === 'error') {
         this.failed = true;
         toast('Could not download the speech model. Check the connection and tap the mic again.', 6000);
         this.worker.terminate(); this.worker = null; this.stop();
       } else if (m.type === 'result') {
-        if (this.twoLanes()) { if (m.kind === 'partial') this.busyP = false; else { this.busyF = false; this.busyKind = ''; } this.busy = this.busyP || this.busyF; }
+        if (this.twoLanes()) { if (m.kind === 'partial') { this.inflightP = Math.max(0, this.inflightP - 1); this.busyP = this.inflightP >= this.maxP(); } else { this.busyF = false; this.busyKind = ''; } this.busy = this.busyP || this.busyF; }
         else { this.busy = false; this.busyKind = ''; }
         if (m.ms) {
           this.ms.push(m.ms); if (this.ms.length > 8) this.ms.shift();
           // cost of a reading ~ a (fixed: the model always hears 30 s) + b per second of audio (writing it out)
           if (m.secs > 1.5) { this.perSec.push(Math.max(0, (m.ms - this.costA) / m.secs)); if (this.perSec.length > 6) this.perSec.shift(); }
         }
-        if (window.__asrLog) window.__asrLog.push({ kind: m.kind, seg: m.seg, ms: m.ms, secs: m.secs, at: performance.now(), text: m.text }); // dev-only test log
+        // (a live reading the server replaced by a newer one; or one older than a reading already used)
+        if (m.dropped) { this.pump(); return; }
+        if (m.kind === 'partial' && m.len != null) {
+          if (m.seg === this.lastLive.seg && m.len <= this.lastLive.len) { this.pump(); return; }
+          this.lastLive = { seg: m.seg, len: m.len };
+        }
+        if (window.__asrLog) window.__asrLog.push({ kind: m.kind, seg: m.seg, ms: m.ms, secs: m.secs, at: performance.now(), text: m.text + (m.gap != null ? '  (gap ' + m.gap.toFixed(2) + ')' : '') }); // dev-only test log
         if (m.kind === 'final') this.chain = this.chain.then(() => this.judge(m.text, m.seg)).catch(() => {});
-        else if (m.kind === 'verify') { const f = this.verifyWait; this.verifyWait = null; if (f) f(m.text); }
+        else if (m.kind === 'verify' || m.kind === 'verifyc') { const f = this.verifyWait; this.verifyWait = null; if (f) f(m.text); }
         else {
-          const whole = this.partialWhole;
-          // (two lanes: the earlier phrase may not be judged yet; its words come first, so this one only moves
-          // the highlight for now, at once, and locks nothing in)
-          if ([...this.pendingFinal].some(x => x < m.seg)) this.peek(m.text, m.seg, whole);
-          else this.chain = this.chain.then(() => this.live(m.text, m.seg, whole)).catch(() => {});
+          const whole = m.whole != null ? !!m.whole : this.partialWhole, gap = m.gap;
+          // (two lanes: the earlier phrase may not be judged yet, or is being double-checked; its words come
+          // first, so this one only moves the highlight for now, at once, and locks nothing in)
+          if ([...this.pendingFinal].some(x => x < m.seg) || (this.judging != null && this.judging < m.seg)) this.peek(m.text, m.seg, whole, gap);
+          else this.chain = this.chain.then(() => this.live(m.text, m.seg, whole, gap)).catch(() => {});
         }
         this.updateSpeed(); this.showSpeed();
         this.pump();
@@ -876,7 +895,7 @@
       if (a.state !== 'running') { try { await a.resume(); } catch (e) { /* tried */ } }
       a.onstatechange = () => { if (this.on && this.ctx === a && a.state !== 'running' && a.state !== 'closed') a.resume().catch(() => {}); };
       this.src = a.createMediaStreamSource(this.stream);
-      this.node = a.createScriptProcessor(4096, 1, 1);
+      this.node = a.createScriptProcessor(4096, 1, 1); // (2048 drops audio on a busy slow phone)
       this.sink = a.createGain(); this.sink.gain.value = 0;
       this.rs = { ratio: a.sampleRate / 16000, pos: 0, acc: 0, n: 0 };
       this.nonzero = false; this.frames = 0;
@@ -949,6 +968,7 @@
         // the qari is speaking: drop what the mic hears (and forget words of the dropped phrase already used)
         if (this.inSpeech || this.len) phraseSkip = 0;
         this.inSpeech = false; this.buf = []; this.len = 0; this.pre = []; this.preLen = 0; this.run = 0; this.partial = null;
+        this.unsent = []; this.unsentLen = 0;
         return;
       }
       let e = 0; for (let i = 0; i < f.length; i++) e += f[i] * f[i];
@@ -970,15 +990,29 @@
         while (this.preLen > 16000 * 0.35) this.preLen -= this.pre.shift().length;
         this.run = voiced ? this.run + 1 : 0;
         if (this.run >= 3) {
+          if (window.__asrLog) window.__asrLog.push({ kind: "vad", seg: this.seg + 1, at: performance.now(), text: "speech start, pre " + (this.preLen / 16000).toFixed(2) + "s, ctx " + (this.ctx && this.ctx.baseLatency) + " out " + (this.ctx && this.ctx.outputLatency) }); // dev-only
           this.inSpeech = true; this.seg++; this.silence = 0; this.voicedN = this.run; this.lastPartialLen = 0;
           this.buf = this.pre; this.len = this.preLen; this.pre = []; this.preLen = 0;
           this.lastPartial = performance.now();
+          // (a phrase is streamed from its first sample, or not at all: the server must have it whole)
+          this.streamSeg = this.streaming() ? this.seg : -1;
+          if (this.streamSeg >= 0) { this.unsent = this.buf.slice(); this.unsentLen = this.len; }
         }
         return;
       }
       this.buf.push(f); this.len += f.length;
       if (voiced) this.voicedN++;
       this.silence = voiced ? 0 : this.silence + 20;
+      // streaming to the server: every 80 ms of audio (the server reads it whenever its model is free)
+      if (this.streamSeg === this.seg && this.streaming()) {
+        this.unsent.push(f); this.unsentLen += f.length;
+        if (this.unsentLen >= 1280 && this.silence < 650) {
+          const out = new Float32Array(this.unsentLen); let o = 0;
+          for (const b of this.unsent) { out.set(b, o); o += b.length; }
+          this.unsent = []; this.unsentLen = 0;
+          this.worker.sendChunk(this.seg, out, this.silence >= 100);
+        }
+      }
       if (this.silence >= 650) { this.endSegment(); return; }
       // A long phrase is cut sooner (the small model drops the last words of long phrases): after 7 s at a
       // short pause between words (160 ms, longer than the stops inside a word), after 14 s at a 100 ms
@@ -990,6 +1024,7 @@
         if (cutLate && !cutGap) this.cutMid.add(this.seg);
         this.cutNow = false;
         this.endSegment(); this.inSpeech = true; this.seg++; this.silence = 0; this.lastPartial = performance.now(); this.lastPartialLen = 0;
+        this.streamSeg = this.streaming() ? this.seg : -1;
         // 12 s without a pause may be room noise, not recitation: let the floor learn the last 3 s
         let mn = Infinity; for (const v of this.recent) if (v < mn) mn = v; this.floor = Math.max(0.0008, mn);
         return;
@@ -997,9 +1032,10 @@
       // live reading of the phrase so far, whenever the model is free (on a slow phone that is back to back);
       // not in a long pause that may be the end of the phrase, so the final reading never waits behind one.
       // The best moment is the short pause between two words (the last word is then complete): read there too.
-      const due = this.silence < 200 && performance.now() - this.lastPartial > (this.remote ? (this.costA < 150 ? 120 : 200) : 500);
+      const fast = this.remote && this.srvStream >= 2;
+      const due = this.silence < 200 && performance.now() - this.lastPartial > (fast ? 80 : this.remote ? (this.costA < 150 ? 120 : 200) : 500);
       const gap = this.silence >= 100 && this.silence < 300;
-      if ((this.twoLanes() ? !this.busyP : (!this.busy && !this.finals.length)) && !this.slowDevice() && (due || gap) && this.len > (this.lastPartialLen || 0) + 3200 && this.len > 16000 * (this.remote ? 0.6 : 1.2)) {
+      if (!(this.streamSeg === this.seg && this.streaming()) && (this.twoLanes() ? !this.busyP : (!this.busy && !this.finals.length)) && !this.slowDevice() && (due || gap) && this.len > (this.lastPartialLen || 0) + (fast ? 1280 : 3200) && this.len > 16000 * (fast ? 0.5 : this.remote ? 0.6 : 1.2)) {
         this.lastPartial = performance.now(); this.lastPartialLen = this.len;
         // (if the audio so far ends in a short pause, its last word is complete: the reading keeps it)
         this.partial = { kind: 'partial', seg: this.seg, audio: this.join(), whole: this.silence >= 100 };
@@ -1015,6 +1051,7 @@
       // keep the whole phrase, including the quiet end: soft final syllables (a fading madd) live there
       const audioSeg = this.join();
       const voicedN = this.voicedN; this.voicedN = 0;
+      this.unsent = []; this.unsentLen = 0;
       this.inSpeech = false; this.buf = []; this.len = 0; this.silence = 0; this.partial = null;
       // a click, a cough or a door is not a phrase: at least 0.2 s of clear sound
       if (audioSeg.length > 16000 * 0.25 && voicedN >= 10) {
@@ -1028,9 +1065,9 @@
     // for good) at once: nothing to judge, so no risk of a false mistake. Anything that looks wrong waits for
     // the phrase's final reading and its double-check (two live readings of the same audio often share a
     // garbled word, so their agreeing proves nothing). The rest is shown as a preview.
-    live(text, seg, whole) {
+    live(text, seg, whole, gap) {
       if (seg <= this.judgedSeg) return;
-      const all = E.tokenize(text), words = whole ? all : all.slice(0, -1);
+      const all = E.tokenize(text), words = whole ? all : all.slice(0, -1), tail = whole ? null : all[all.length - 1] || null;
       const A = this.agree.seg === seg ? this.agree : (this.agree = { seg, prev: [], done: 0, locked: [] });
       A.prev = words;
       // Readings of the same phrase don't always start alike (one may add or drop a garbled first word), so
@@ -1042,10 +1079,10 @@
       // locking those in could lock in a garbled word before it is judged)
       // (before your place is found, one try: each try searches the whole Quran, and nothing locks in until then)
       for (let j = words.length; j > n; j--) { const ok = cleanFeed(words.slice(start, j)); if (ok > 0) { n = start + ok; break; } if (T.c < 0) break; }
-      if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, text: 'locked ' + start + '->' + n + ' of ' + words.length + ' | T.c=' + T.c + ' q=' + T.q.length + ' qi=' + T.qi }); // dev-only
+      if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, at: performance.now(), text: 'locked ' + start + '->' + n + ' of ' + words.length + ' | T.c=' + T.c + ' q=' + T.q.length + ' qi=' + T.qi }); // dev-only
       if (n > start) {
         const fresh = words.slice(start, n); A.locked.push(...fresh); A.done = A.locked.length; P = null; T.feed(fresh);
-        if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, text: '  fed [' + fresh.join(' ') + '] -> c=' + T.c + ' events ' + T.events.map(e => e.type + '@' + e.pos + (e.to != null ? '->' + e.to : '')).join(',') }); // dev-only
+        if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, at: performance.now(), text: '  fed [' + fresh.join(' ') + '] -> c=' + T.c + ' events ' + T.events.map(e => e.type + '@' + e.pos + (e.to != null ? '->' + e.to : '')).join(',') }); // dev-only
         handleEvents();
       }
       // A mistake shown by a live reading (and confirmed by the words after it): don't wait for the reciter to
@@ -1058,24 +1095,26 @@
         // (a word split in two right after the mistake, e.g. بمصابيح heard as "ذب مصابيح", hides it: allow one stray word)
         for (let i = 1; i <= 2 && at < 0 && rest.length >= 3; i++) at = stopAt(rest.filter((_, k) => k !== i));
         if (at >= 0 && A.cutFor !== at) { A.cutFor = at; this.cutNow = true; this.cutAt = performance.now(); }
-        if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, text: '  suspect ' + (at >= 0 ? M.disp[at] : '-') + ' (before: ' + (A.suspect >= 0 ? M.disp[A.suspect] : '-') + ') rest=[' + rest.join(' ') + ']' + (this.cutNow ? ' CUT' : '') }); // dev-only
+        if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, at: performance.now(), text: '  suspect ' + (at >= 0 ? M.disp[at] : '-') + ' (before: ' + (A.suspect >= 0 ? M.disp[A.suspect] : '-') + ') rest=[' + rest.join(' ') + ']' + (this.cutNow ? ' CUT' : '') }); // dev-only
         A.suspect = at;
       }
-      if (seg === this.seg && this.inSpeech && words.length > n) preview(words.slice(n).join(' '), true);
+      if (seg === this.seg && this.inSpeech && (words.length > n || tail)) preview(words.slice(n).join(' '), true, tail);
       else { P = null; render(); }
     },
     // A live reading shown without locking anything in (an earlier phrase is still being judged)
-    peek(text, seg, whole) {
+    peek(text, seg, whole, gap) {
       if (seg !== this.seg || !this.inSpeech) return;
       const all = E.tokenize(text), words = whole ? all : all.slice(0, -1);
-      if (words.length) preview(words.join(' '), true);
+      if (all.length) preview(words.join(' '), true, whole ? null : all[all.length - 1]);
     },
     // the words of a final reading that were not already locked in from live readings
-    unlocked(text, seg) {
+    unlocked(text, seg, wide) {
       const w = E.tokenize(text);
       const A = this.agree;
       if (A.seg !== seg || !A.locked.length) return w.join(' ');
-      const at = alignAfter(w, A.locked);
+      // (wide: only where the locked words' last 2+ are found, else as before)
+      let at = alignAfter(w, A.locked, false);
+      if (wide) { const W = alignAfter(w, A.locked, true); if (W >= 0 && (at < 0 || W > at)) { const k = Math.min(2, A.locked.length); let sc = 0; for (let i = 1; i <= k; i++) if (w[W - i] && (w[W - i] === A.locked[A.locked.length - i] || E.sim(w[W - i], A.locked[A.locked.length - i]) >= 0.7)) sc++; if (sc === k) at = W; } }
       return w.slice(at >= 0 ? at : Math.min(A.locked.length, w.length)).join(' ');
     },
     // ms to read L seconds of audio on this device
@@ -1104,6 +1143,10 @@
     // garbles a word once (تفاوت -> "تفاق"); a real slip (الجنوب) is heard the same way both times.
     // Only when both readings show the mistake does Sabaq stop.
     async judge(text, seg) {
+      this.judging = seg;
+      try { await this.judgeNow(text, seg); } finally { this.judging = null; }
+    },
+    async judgeNow(text, seg) {
       this.judgedSeg = Math.max(this.judgedSeg, seg);
       this.pendingFinal.delete(seg);
       const midCut = this.cutMid.delete(seg);
@@ -1114,7 +1157,7 @@
       if (!text.trim()) { commit('', true, true); return; }
       const stopsWith = t => { const C = T.clone(); const n0 = C.events.length; C.feed(E.tokenize(t)); C.flush(); return C.events.slice(n0).find(e => e.type === 'stop') || null; };
       const audioSeg = this.audioOf.get(seg);
-      if (window.__asrLog) { const st0 = stopsWith(text); window.__asrLog.push({ kind: 'judge', seg, text: 'rest=[' + text + '] done=' + this.agree.done + ' prev=[' + this.agree.prev.join(' ') + '] T.c=' + (T.c >= 0 ? M.disp[T.c] : '-') + ' pendingQ=' + T.q.slice(T.qi).join(' ') + (st0 ? ' STOP@' + M.disp[st0.pos] + ' st=' + st0.state : '') }); } // dev-only
+      if (window.__asrLog) { const st0 = stopsWith(text); window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'rest=[' + text + '] done=' + this.agree.done + ' prev=[' + this.agree.prev.join(' ') + '] T.c=' + (T.c >= 0 ? M.disp[T.c] : '-') + ' pendingQ=' + T.q.slice(T.qi).join(' ') + (st0 ? ' STOP@' + M.disp[st0.pos] + ' st=' + st0.state : '') }); } // dev-only
       const st1 = T.strict && audioSeg ? stopsWith(text) : null;
       if (!st1) { commit(text, true, true); return; }
       // On the speech server, live readings come from a different (faster) model than this final reading: if one
@@ -1127,24 +1170,40 @@
       // the second reading also hears the end of the previous phrase: a different context makes the model
       // decode afresh (a garble caused by how the audio was cut, or by a fast join, is then not repeated)
       const prev = this.audioOf.get(seg - 1);
-      const alt = await this.verify(audioSeg, prev ? prev.subarray(Math.max(0, prev.length - 24000)) : null);
+      const ctxAudio = prev ? prev.subarray(Math.max(0, prev.length - 24000)) : null;
+      let alt = await this.verify(audioSeg, ctxAudio);
+      // (Whisper can get stuck repeating a phrase, or time out: a broken second reading confirms nothing. Then the
+      // fast model reads the same audio again, with the end of the previous phrase in front: a different decoding)
+      const broken = t => { const w = E.tokenize(t || ''); return !w.length || (w.length > 6 && new Set(w).size <= w.length / 3); };
+      if (broken(alt) && this.remote && this.models && this.models.verify && this.models.verify !== this.models.live) {
+        if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'second reading broken, reading again with the fast model' }); // dev-only
+        alt = await this.verify(audioSeg, ctxAudio, 'verifyc');
+      }
       if (window.__asrLog) window.__asrLog.push({ kind: 'verify', seg, text: alt, at: performance.now() }); // dev-only test log
       // drop the words of that context: the second reading starts where this phrase's first word is found
       let altW = alt ? E.tokenize(alt) : [];
       if (midCut) altW = altW.slice(0, -1);
       if (prev && full.length) { const i = altW.indexOf(full[0]); if (i > 0 && i <= 6) altW = altW.slice(i); }
-      const altRest = altW.length ? this.unlocked(altW.join(' '), seg) : '';
+      const altRest = altW.length ? this.unlocked(altW.join(' '), seg, !!prev) : '';
+      // The second reading, by a different model, hears no mistake at all (and as many words): the first reading was
+      // garbled as a whole (fast recitation can turn "وهو حسير ولقد زينا" into "بسم الله الرحمن الرحيم"), and
+      // mending it word by word would keep its garbage. No stop: a stop needs both readings to hear the mistake.
+      const altN = E.tokenize(altRest).length;
+      if (altN && altN >= E.tokenize(text).length - 1 && !stopsWith(altRest)) {
+        if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'second reading clean: [' + altRest + ']' }); // dev-only
+        commit(altRest, true, true); return;
+      }
       // Consensus of the two readings: wherever they differ, keep the word that fits the text. A mistake
       // is then left only where both readings heard it (a real slip); a word garbled in one reading only
       // (each reading tends to garble a different word) is not one.
       const merged = altRest.trim() ? consensus(E.tokenize(text), E.tokenize(altRest)).join(' ') : text;
-      if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, text: 'consensus=[' + merged + ']' }); // dev-only
+      if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'consensus=[' + merged + ']' }); // dev-only
       if (!stopsWith(merged)) { commit(merged, true, true); return; }
       // both readings show the mistake: stop now (the reciter has paused; no need to wait for more words)
       commit(merged, true, true);
       if (!P) { clearTimeout(idleTimer); T.flush(); handleEvents(); render(); }
     },
-    verify(audioSeg, before) {
+    verify(audioSeg, before, kind = 'verify') {
       return new Promise(res => {
         const lead = before ? before.length : 8000;
         const pad = new Float32Array(lead + audioSeg.length + 4800);
@@ -1153,11 +1212,13 @@
         const timer = setTimeout(() => { if (this.verifyWait === done) this.verifyWait = null; res(null); }, 25000);
         const done = t => { clearTimeout(timer); res(t); };
         this.verifyWait = done;
-        this.finals.unshift({ kind: 'verify', seg: -1, audio: pad }); // before any later phrase
+        this.finals.unshift({ kind, seg: -1, audio: pad }); // before any later phrase
         this.pump();
       });
     },
     twoLanes() { return !!(this.remote && this.lanes >= 2); },
+    streaming() { return !!(this.remote && this.ready && this.srvStream >= 3 && this.worker && this.worker.sendChunk); },
+    maxP() { return this.srvStream >= 2 ? 2 : 1; },
     pump() {
       if (!this.ready || !this.worker) return;
       if (this.twoLanes()) {
@@ -1167,8 +1228,9 @@
           this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio });
         }
         if (!this.busyP && this.partial) {
-          const job = this.partial; this.partial = null; this.partialWhole = !!job.whole; this.busyP = true;
-          this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio });
+          const job = this.partial; this.partial = null; this.partialWhole = !!job.whole;
+          this.inflightP++; this.busyP = this.inflightP >= this.maxP();
+          this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio, whole: job.whole });
         }
         this.busy = this.busyF || this.busyP;
         return;
@@ -1326,7 +1388,8 @@
   };
   function openWord(p) {
     const st = T.state[p], w = M.where(p);
-    const info = st === CORRECT && T.fixed.has(p) ? ['Fixed', 'ok', 'This word was missed or wrong at first, then recited correctly.'] : STATE_INFO[st];
+    const info = st === CORRECT && T.fixed.has(p) ? ['Fixed', 'ok', 'A mistake here (missed or wrong at first), then recited correctly.']
+      : T.flagged.has(p) && st !== CORRECT && st !== WRONG && st !== MISSED ? ['Needed help', 'miss', 'You were stopped on this word and the qari recited it for you.'] : STATE_INFO[st];
     $('wordDlgTitle').textContent = `${M.surahs[w.surah - 1].en} · ayah ${w.ayah}`;
     const body = $('wordBody');
     body.replaceChildren();
@@ -1389,12 +1452,12 @@
       if (s.unclear) fact(s.unclear, s.unclear === 1 ? 'word the recognizer did not catch, not counted' : 'words the recognizer did not catch, not counted');
       body.append(score, facts);
       const rows = [];
-      for (let p = 0; p < T.state.length; p++) if (T.state[p] === WRONG || T.state[p] === MISSED || T.state[p] === CLOSE) rows.push(p);
+      for (let p = 0; p < T.state.length; p++) if (T.state[p] === WRONG || T.state[p] === MISSED || T.state[p] === CLOSE || (T.flagged.has(p) && T.state[p] !== CORRECT)) rows.push(p);
       if (rows.length) {
         const lab = document.createElement('div'); lab.className = 'section-label'; lab.textContent = 'Review';
         const list = document.createElement('div'); list.className = 'mlist';
         for (const p of rows.slice(0, 60)) {
-          const w = M.where(p), st = T.state[p], info = STATE_INFO[st];
+          const w = M.where(p), st = T.state[p], info = T.flagged.has(p) && st !== WRONG && st !== MISSED && st !== CLOSE ? ['Needed help', 'miss'] : STATE_INFO[st];
           const b = document.createElement('button'); b.type = 'button'; b.className = 'mrow';
           b.innerHTML = '<span class="ref"></span><span class="wd" lang="ar"></span><span class="pill"></span>';
           b.querySelector('.ref').textContent = w.surah + ':' + w.ayah;

@@ -176,6 +176,12 @@
         const k2 = this.keys[p + 1];
         if (k2.length >= 3 && r.length > k2.length && r.endsWith(k2) && sim(r.slice(0, r.length - k2.length), k) >= 0.5) {
           best = { s: Math.max(STRONG, best.nt === 2 ? best.s : 0), nr: 1, nt: 2, blend: true };
+        } else if (k2.length >= 4 && r.length > k2.length) {
+          // recited fast, the second word is also blurred a little: من تفاوت -> "انتفوت"
+          for (let L = k2.length - 1; L <= k2.length + 1 && !best.blend; L++) {
+            if (L < 3 || L >= r.length - 1) continue;
+            if (sim(r.slice(r.length - L), k2) >= 0.75 && sim(r.slice(0, r.length - L), k) >= 0.5) best = { s: STRONG, nr: 1, nt: 2, blend: true };
+          }
         }
       }
       return best;
@@ -268,6 +274,7 @@
       this.strict = false;
       this.stopped = -1;      // position we are stopped at, or -1
       this.fixed = new Set(); // words that were wrong/skipped and then recited correctly
+      this.flagged = new Set(); // words the reciter was stopped on (teacher mode): they stay marked
       this.heardCount = 0;    // words heard so far
       this.stopHeard = -99;   // heardCount when the last stop signal was given
       this.stopWord = null;   // what was heard when the reciter was stopped (null: the word was skipped)
@@ -279,7 +286,7 @@
       t.m = this.m; t.state = this.state.slice(); t.heard = new Map(this.heard);
       t.c = this.c; t.q = this.q.slice(); t.qi = this.qi; t.lost = this.lost.slice();
       t.events = []; t.stats = Object.assign({}, this.stats); t.sawBismillah = this.sawBismillah;
-      t.strict = this.strict; t.stopped = this.stopped; t.fixed = new Set(this.fixed);
+      t.strict = this.strict; t.stopped = this.stopped; t.fixed = new Set(this.fixed); t.flagged = new Set(this.flagged);
       t.heardCount = this.heardCount; t.stopHeard = this.stopHeard; t.stopWord = this.stopWord; t.attempts = this.attempts; t.noRewindBefore = this.noRewindBefore; t.letContinue = this.letContinue; t.hint = this.hint;
       return t;
     }
@@ -295,7 +302,7 @@
     reset() {
       this.state.fill(0); this.heard.clear(); this.q = []; this.qi = 0; this.lost = [];
       this.events = []; this.stats = { restarts: 0, selfCorrected: 0, fillers: 0, extras: 0 };
-      this.stopped = -1; this.fixed.clear();
+      this.stopped = -1; this.fixed.clear(); this.flagged.clear();
     }
     feed(words) {
       for (const w of words) { const n = norm(w); if (n && !this.m.hesitation.has(n)) { this.q.push(n); this.heardCount++; } }
@@ -323,7 +330,7 @@
       if (st === CORRECT && (prev === WRONG || prev === MISSED || prev === CLOSE)) {
         this.stats.selfCorrected++;
         this.heard.delete(p);
-        if (prev !== CLOSE || this.stopped === p) this.fixed.add(p);
+        if (prev !== CLOSE || this.stopped === p || this.flagged.has(p)) this.fixed.add(p);
         if (this.stopped === p) this.stopped = -1;
         this.events.push({ type: 'selfCorrected', pos: p });
       }
@@ -601,11 +608,22 @@
       // A fresh attempt at the word itself (said wrong again) is always corrected again.
       if (again && !attempt && this.heardCount - this.stopHeard < 5) return true;
       this.stopHeard = this.heardCount;
+      this.flagged.add(p);
       this.events.push({ type: 'stop', pos: p, state: this.state[p] });
       return true;
     }
 
     _relocate() {
+      // Not placed yet, with a surah open (hint): starting it from the top is the usual case, and its first two
+      // words, clearly heard, are enough. The highlight then starts on the third word, not three words late.
+      if (this.c < 0 && this.hint && this.lost.length === 2) {
+        const s0 = this.hint[0], q = this.q, L = this.lost;
+        if (s0 + 1 < this.hint[1] && sim(q[L[0]], this.m.keys[s0]) >= STRONG && sim(q[L[1]], this.m.keys[s0 + 1]) >= STRONG) {
+          this.c = s0; this.qi = L[0]; this.lost.length = 0; this.noRewindBefore = q.length;
+          this.events.push({ type: 'locked', pos: s0 });
+          return true;
+        }
+      }
       if (this.lost.length < 3) return false;
       if (this.stopped >= 0 && this.lost.length < 10) return false; // stopped: don't drift ahead unless clearly elsewhere
       const words = this.lost.map(i => this.q[i]);

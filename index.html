@@ -34,6 +34,7 @@
   --check-bg: #f6ead2;
   --miss: #b23a3c;
   --miss-bg: #f7dfdc;
+  --ok-bg: #dcefe3;
   --unclear: #7c8a90;
   --cursor-bg: #e6eef0;
   --shadow: 0 1px 2px rgb(22 33 30 / .06), 0 8px 24px rgb(22 33 30 / .08);
@@ -49,7 +50,7 @@
   :root:not([data-theme="light"]) {
     --paper: #0e1416; --sheet: #121a1c; --ink: #e4ebe8; --muted: #95a39e; --pending: #64716c;
     --rule: #233033; --veil: #1d282a; --lapis: #6fb0c4; --lapis-ink: #0b1517; --gilt: #d2b066;
-    --ok: #69bd8b; --check: #e2a24a; --check-bg: #3a2c14; --miss: #f07b7b; --miss-bg: #3d1d1e;
+    --ok: #69bd8b; --ok-bg: #173323; --check: #e2a24a; --check-bg: #3a2c14; --miss: #f07b7b; --miss-bg: #3d1d1e;
     --unclear: #84939a; --cursor-bg: #1b2a30; --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 24px rgb(0 0 0 / .35);
     color-scheme: dark;
   }
@@ -57,7 +58,7 @@
 :root[data-theme="dark"] {
   --paper: #0e1416; --sheet: #121a1c; --ink: #e4ebe8; --muted: #95a39e; --pending: #64716c;
   --rule: #233033; --veil: #1d282a; --lapis: #6fb0c4; --lapis-ink: #0b1517; --gilt: #d2b066;
-  --ok: #69bd8b; --check: #e2a24a; --check-bg: #3a2c14; --miss: #f07b7b; --miss-bg: #3d1d1e;
+  --ok: #69bd8b; --ok-bg: #173323; --check: #e2a24a; --check-bg: #3a2c14; --miss: #f07b7b; --miss-bg: #3d1d1e;
   --unclear: #84939a; --cursor-bg: #1b2a30; --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 24px rgb(0 0 0 / .35);
   color-scheme: dark;
 }
@@ -130,7 +131,8 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-b
 /* teacher mode: the word you are stopped at, and words you fixed */
 .w.stopw, .w.stopw.cur { color: var(--miss); background: var(--miss-bg); box-shadow: 0 0 0 .09em var(--miss); animation: stopPulse 1.1s ease-in-out 3; }
 @keyframes stopPulse { 50% { box-shadow: 0 0 0 .22em var(--miss-bg), 0 0 0 .09em var(--miss); } }
-.w.fx { color: var(--ok); }
+.w.fx { color: var(--ok); background: var(--ok-bg); border-radius: .25em; box-shadow: inset 0 -.1em 0 var(--miss); }
+.w.hlp, .w.hlp.cur { color: var(--miss); background: var(--miss-bg); text-decoration: none; border-radius: .25em; }
 .w.fx::after { content: "✓"; font-family: var(--f-ui); font-size: .42em; font-weight: 600; vertical-align: super; color: var(--ok); margin-inline-start: .12em; }
 .aya { color: var(--gilt); font-family: var(--f-quran); white-space: nowrap; padding: 0 .08em; }
 
@@ -145,6 +147,7 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-b
 .sw.u { border-bottom: 2px dotted var(--unclear); }
 .sw.x { background: var(--miss-bg); }
 .sw.m { border-bottom: 2px solid var(--miss); }
+.sw.f { background: var(--ok-bg); border-bottom: 2px solid var(--miss); }
 .legend .tick { color: var(--ok); font-weight: 600; }
 
 /* ---------- dock ---------- */
@@ -265,6 +268,7 @@ textarea { width: 100%; min-height: 7.5rem; border: 1px solid var(--rule); backg
           <span><i class="sw u"></i>Not clearly heard (not counted)</span>
           <span><i class="sw x"></i>Wrong word</span>
           <span><i class="sw m"></i>Skipped</span>
+          <span><i class="sw f"></i>Mistake, then fixed</span>
           <span><b class="tick">✓</b>Fixed after a stop</span>
         </div>
       </article>

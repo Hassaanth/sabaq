@@ -171,14 +171,16 @@ const server = http.createServer((req, res) => {
 //   {t:'full', id, kind, seg} + pcm read this audio as it is (the double-check, with its own context)
 const PAD = Math.round(16000 * (process.env.PAD != null ? +process.env.PAD : 0.6));
 const NOISE = new Float32Array(PAD); { let x = 12345; for (let i = 0; i < PAD; i++) { x = (x * 1103515245 + 12345) >>> 0; NOISE[i] = (x / 4294967296 - 0.5) * 0.003; } }
-const toFloat = (pcm) => { const s = new Int16Array(pcm.buffer, pcm.byteOffset, pcm.length >> 1); const a = new Float32Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s[i] / 32768; return a; };
+// (a message's bytes can sit at an odd position in memory, where 16-bit samples can't be read in place: copy them)
+const toFloat = (pcm) => { if (pcm.byteOffset % 2) pcm = Buffer.from(pcm); const s = new Int16Array(pcm.buffer, pcm.byteOffset, pcm.length >> 1); const a = new Float32Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s[i] / 32768; return a; };
 const wss = new WebSocketServer({ server, path: '/asr', maxPayload: 16000 * 2 * 32 + 4096 });
 wss.on('connection', ws => {
   const segs = new Map(); // seg -> { parts: Float32Array[], len }
   ws.segs = segs; ws.live = null;
   const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true, lanes: LANES, models: NAMES, stream: LANES >= 2 ? 3 : 2 }));
   if (read$.fast && read$.slow) hello(); else loading.then(hello);
-  ws.on('message', (data, isBinary) => {
+  ws.on('message', (data, isBinary) => { try { onMessage(data, isBinary); } catch (e) { console.error('bad message:', e && e.message); } });
+  const onMessage = (data, isBinary) => {
     if (!isBinary) return;
     const buf = Buffer.isBuffer(data) ? data : Buffer.concat(data);
     const n = buf.readUInt32LE(0);
@@ -220,7 +222,7 @@ wss.on('connection', ws => {
     }
     queue.push({ ws, id: head.id, kind: head.kind, seg: head.seg, whole: head.whole, pad: head.pad || 0, audio });
     pump();
-  });
+  };
   ws.on('close', () => { lives.delete(ws); for (let i = queue.length - 1; i >= 0; i--) if (queue[i].ws === ws) queue.splice(i, 1); });
 });
 

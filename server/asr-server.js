@@ -30,6 +30,16 @@ const require = createRequire(import.meta.url);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SITE = path.join(HERE, '..');
 const PORT = +process.env.PORT || 8787;
+// ---- settings (all from the environment, so the same file runs on this PC or a cloud host)
+//   PORT, THREADS (model threads), PAD (seconds of faint noise after a live reading, default 0.6),
+//   MAX_CONNS (simultaneous reciters, default 24), MAX_JOBS (queued phrase readings + double-checks per reciter,
+//   default 6), ORIGINS (comma list of sites allowed to connect, e.g. https://hassaanth.github.io; empty = any),
+//   LOG_EVERY (seconds between activity summaries, default 60; 0 = off)
+const MAX_CONNS = +process.env.MAX_CONNS || 24;
+const MAX_JOBS = +process.env.MAX_JOBS || 6;
+const ORIGINS = (process.env.ORIGINS || '').split(',').map(x => x.trim()).filter(Boolean);
+const LOG_EVERY = process.env.LOG_EVERY != null ? +process.env.LOG_EVERY : 60;
+const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const MODEL = process.env.MODEL || 'eventhorizon0/tarteel-ai-onnx-whisper-base-ar-quran';
 const FALLBACK_LIVE = 'Sharjeelbaig/whisper-tiny-ar-quran-onnx';
 // Some model builds cannot be told the language (their config lacks the table); Arabic Quran is all they know
@@ -108,16 +118,28 @@ const loading = (async () => {
 const modelFor = kind => (NAMES.live === 'fastconformer-ctc' ? (kind === 'verify' ? read$.slow : read$.fast) : (kind === 'partial' ? read$.fast : read$.slow));
 const laneFor = kind => (LANES >= 2 ? (kind === 'verify' ? 'slow' : 'fast') : 'one');
 
+// rolling timings per kind of reading (for /health and the log): model time, and wait from audio in to model start
+const stats = { started: Date.now(), jobs: 0, errors: 0, dropped: 0, refused: 0, by: {} };
+function note(kind, ms, wait) {
+  const b = stats.by[kind] || (stats.by[kind] = { n: 0, ms: [], wait: [] });
+  b.n++; b.ms.push(ms); b.wait.push(wait); if (b.ms.length > 200) { b.ms.shift(); b.wait.shift(); }
+}
+const pct = (a, q) => { if (!a.length) return null; const s = a.slice().sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
+const summary = () => Object.fromEntries(Object.entries(stats.by).map(([k, b]) => [k, { n: b.n, msMedian: pct(b.ms, 0.5), msP90: pct(b.ms, 0.9), waitMedian: pct(b.wait, 0.5), waitP90: pct(b.wait, 0.9) }]));
 const queue = [];
 const busy = { fast: false, slow: false, one: false };
+const lastServed = { fast: null, slow: null, one: null };
 const lives = new Set(); // connections streaming a phrase as it is recited
 function pump() {
   if (!read$.fast || !read$.slow) return;
   for (const lane of LANES >= 2 ? ['fast', 'slow'] : ['one']) {
     if (busy[lane]) continue;
     // phrase readings and double-checks first, then live readings
-    let i = queue.findIndex(j => laneFor(j.kind) === lane && j.kind !== 'partial');
-    if (i < 0) i = queue.findIndex(j => laneFor(j.kind) === lane);
+    // (reciters take turns on each lane: someone with many queued phrases can't hold up everyone else)
+    const mine = j => laneFor(j.kind) === lane;
+    const pick = f => { let k = queue.findIndex(j => mine(j) && f(j) && j.ws !== lastServed[lane]); if (k < 0) k = queue.findIndex(j => mine(j) && f(j)); return k; };
+    let i = pick(j => j.kind !== 'partial');
+    if (i < 0) i = pick(() => true);
     if (i >= 0) { run(queue.splice(i, 1)[0], lane); continue; }
     if (lane === 'fast') { const job = liveJob(); if (job) run(job, lane); }
   }
@@ -137,17 +159,21 @@ function liveJob() {
     L.done = s.len; L.doneWhole = L.whole;
     // (round robin between connections)
     lives.delete(ws); lives.add(ws);
-    return { ws, kind: 'partial', seg: L.seg, whole: L.whole, pad: PAD, audio };
+    return { ws, kind: 'partial', seg: L.seg, whole: L.whole, pad: PAD, audio, rx: s.rx, cap: s.cap };
   }
   return null;
 }
 async function run(job, lane) {
-  busy[lane] = true;
+  busy[lane] = true; lastServed[lane] = job.ws;
   const t = Date.now();
   let text = '', gap = null, error;
   try { const r = await modelFor(job.kind)(job.audio); if (typeof r === 'string') text = r; else { text = r.text; gap = r.gap == null ? null : Math.max(0, r.gap - (job.pad || 0) / 16000); } } catch (e) { error = String((e && e.message) || e); }
   busy[lane] = false;
-  if (job.ws.readyState === 1) job.ws.send(JSON.stringify({ type: 'result', id: job.id, kind: job.kind, seg: job.seg, text, gap, whole: job.whole, len: job.audio.length - (job.pad || 0), error, ms: Date.now() - t, secs: (job.audio.length - (job.pad || 0)) / 16000 }));
+  const ms = Date.now() - t, wait = job.rx ? t - job.rx : 0;
+  stats.jobs++; if (error) { stats.errors++; log('reading failed (' + job.kind + '):', error); } note(job.kind, ms, wait);
+  // timings: wait = from the newest audio arriving to the model starting on it; ms = the model's own time;
+  // cap = the phone's clock stamp of that audio, sent back so the phone can measure the whole round trip
+  if (job.ws.readyState === 1) job.ws.send(JSON.stringify({ type: 'result', id: job.id, kind: job.kind, seg: job.seg, text, gap, whole: job.whole, len: job.audio.length - (job.pad || 0), error, ms, wait, cap: job.cap, secs: (job.audio.length - (job.pad || 0)) / 16000 }));
   pump();
 }
 loading.then(pump);
@@ -158,7 +184,10 @@ const FILES = new Set(['index.html', 'app.js', 'engine.js', 'quran-data.js', 'as
 const server = http.createServer((req, res) => {
   let name = decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '') || 'index.html';
   // (the Sabaq website on GitHub Pages checks this from its own address: allow it)
-  if (name === 'health') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'cross-origin-resource-policy': 'cross-origin' }); res.end(JSON.stringify({ ready: !!(read$.fast && read$.slow), warm, queued: queue.length, models: NAMES, stream: LANES >= 2 ? 3 : 2 })); return; }
+  if (name === 'health') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'cross-origin-resource-policy': 'cross-origin' }); const m = process.memoryUsage();
+    res.end(JSON.stringify({ ready: !!(read$.fast && read$.slow) && !closing, warm, queued: queue.length, models: NAMES, stream: LANES >= 2 ? 3 : 2,
+      conns: wss.clients.size, maxConns: MAX_CONNS, busy, threads: THREADS, cores: CORES, uptime: Math.round((Date.now() - stats.started) / 1000),
+      rssMB: Math.round(m.rss / 1048576), heapMB: Math.round(m.heapUsed / 1048576), jobs: stats.jobs, errors: stats.errors, refused: stats.refused, timings: summary() })); return; }
   if (!FILES.has(name)) { res.writeHead(404); res.end('not found'); return; }
   // (no cross-origin isolation headers: Safari would then refuse the in-browser fallback model's code)
   res.writeHead(200, { 'content-type': TYPES[path.extname(name)], 'cache-control': 'no-cache' });
@@ -173,8 +202,20 @@ const PAD = Math.round(16000 * (process.env.PAD != null ? +process.env.PAD : 0.6
 const NOISE = new Float32Array(PAD); { let x = 12345; for (let i = 0; i < PAD; i++) { x = (x * 1103515245 + 12345) >>> 0; NOISE[i] = (x / 4294967296 - 0.5) * 0.003; } }
 // (a message's bytes can sit at an odd position in memory, where 16-bit samples can't be read in place: copy them)
 const toFloat = (pcm) => { if (pcm.byteOffset % 2) pcm = Buffer.from(pcm); const s = new Int16Array(pcm.buffer, pcm.byteOffset, pcm.length >> 1); const a = new Float32Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s[i] / 32768; return a; };
-const wss = new WebSocketServer({ server, path: '/asr', maxPayload: 16000 * 2 * 32 + 4096 });
-wss.on('connection', ws => {
+let closing = false;
+const wss = new WebSocketServer({ server, path: '/asr', maxPayload: 16000 * 2 * 32 + 4096,
+  verifyClient: (info, cb) => {
+    if (closing) return cb(false, 503, 'restarting');
+    if (ORIGINS.length && info.origin && !ORIGINS.includes(info.origin) && !ORIGINS.includes('*')) { stats.refused++; return cb(false, 403, 'origin not allowed'); }
+    if (wss.clients.size >= MAX_CONNS) { stats.refused++; log('busy: refused a connection (' + wss.clients.size + ' open)'); return cb(false, 503, 'busy'); }
+    cb(true);
+  } });
+// a phone that vanished (tunnel dropped, phone locked) without closing its connection is let go within ~40 s
+const beat = setInterval(() => { for (const ws of wss.clients) { if (ws.alive === false) { ws.terminate(); continue; } ws.alive = false; try { ws.ping(); } catch (e) { /* gone */ } } }, 20000);
+wss.on('connection', (ws, req) => {
+  ws.alive = true; ws.on('pong', () => { ws.alive = true; });
+  ws.on('error', e => log('connection error:', e && e.message));
+  log('reciter connected (' + wss.clients.size + ' open)' + (req && req.headers.origin ? ' from ' + req.headers.origin : ''));
   const segs = new Map(); // seg -> { parts: Float32Array[], len }
   ws.segs = segs; ws.live = null;
   const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true, lanes: LANES, models: NAMES, stream: LANES >= 2 ? 3 : 2 }));
@@ -189,7 +230,9 @@ wss.on('connection', ws => {
     if (head.t === 'chunk') {
       let s = segs.get(head.seg);
       if (!s) { s = { parts: [], len: 0 }; segs.set(head.seg, s); while (segs.size > 8) segs.delete(segs.keys().next().value); }
-      const a = toFloat(pcm); s.parts.push(a); s.len += a.length;
+      // (one phrase holds at most 40 s: the phone cuts phrases at 25 s, so more is a broken client)
+      if (s.len > 16000 * 40) return;
+      const a = toFloat(pcm); s.parts.push(a); s.len += a.length; s.rx = Date.now(); s.cap = head.cap;
       // {live: 1}: the phrase being recited now, streamed; whole: its audio ends in a short pause
       if (head.live && LANES >= 2) {
         if (!ws.live || ws.live.seg !== head.seg) { if (ws.live && head.seg < ws.live.seg) return; ws.live = { seg: head.seg, done: 0, whole: false, doneWhole: false }; }
@@ -220,10 +263,29 @@ wss.on('connection', ws => {
       const i = queue.findIndex(j => j.ws === ws && j.kind === 'partial');
       if (i >= 0) { const old = queue.splice(i, 1)[0]; ws.send(JSON.stringify({ type: 'result', kind: 'partial', seg: old.seg, dropped: true })); }
     }
-    queue.push({ ws, id: head.id, kind: head.kind, seg: head.seg, whole: head.whole, pad: head.pad || 0, audio });
+    // (each reciter may have only so many phrase readings and double-checks waiting)
+    if (head.kind !== 'partial' && queue.filter(j => j.ws === ws && j.kind !== 'partial').length >= MAX_JOBS) {
+      stats.dropped++; ws.send(JSON.stringify({ type: 'result', id: head.id, kind: head.kind, seg: head.seg, text: '', error: 'busy' })); return;
+    }
+    queue.push({ ws, id: head.id, kind: head.kind, seg: head.seg, whole: head.whole, pad: head.pad || 0, audio, rx: Date.now(), cap: head.cap });
     pump();
   };
-  ws.on('close', () => { lives.delete(ws); for (let i = queue.length - 1; i >= 0; i--) if (queue[i].ws === ws) queue.splice(i, 1); });
+  ws.on('close', () => { log('reciter left (' + wss.clients.size + ' open)'); segs.clear(); lives.delete(ws); for (let i = queue.length - 1; i >= 0; i--) if (queue[i].ws === ws) queue.splice(i, 1); });
 });
 
-server.listen(PORT, () => console.log(`Sabaq speech server on http://localhost:${PORT} (WebSocket /asr)`));
+server.listen(PORT, () => log(`Sabaq speech server on http://localhost:${PORT} (WebSocket /asr), up to ${MAX_CONNS} reciters` + (ORIGINS.length ? ', sites: ' + ORIGINS.join(' ') : '')));
+if (LOG_EVERY > 0) setInterval(() => { if (stats.jobs) log('activity:', wss.clients.size, 'connected,', queue.length, 'queued,', JSON.stringify(summary()), 'rss', Math.round(process.memoryUsage().rss / 1048576) + 'MB'); }, LOG_EVERY * 1000).unref();
+// Graceful stop (a cloud host sends SIGTERM before replacing the server): no new reciters, the open ones are told
+// (their phones reconnect by themselves), readings in progress finish (up to 3 s), then exit.
+function shutdown(sig) {
+  if (closing) return; closing = true; log(sig + ': stopping');
+  clearInterval(beat);
+  for (const ws of wss.clients) { try { ws.send(JSON.stringify({ type: 'bye' })); ws.close(1012, 'restarting'); } catch (e) { /* gone */ } }
+  server.close();
+  const end = Date.now() + 3000;
+  const wait = () => ((busy.fast || busy.slow || busy.one) && Date.now() < end ? setTimeout(wait, 100) : process.exit(0));
+  wait();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('unhandledRejection', e => { stats.errors++; log('unhandled:', e && (e.stack || e.message || e)); });

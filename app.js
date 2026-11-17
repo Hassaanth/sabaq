@@ -5,6 +5,19 @@
   const M = new E.Mushaf(window.QURAN);
   const { PENDING, CORRECT, CLOSE, UNCLEAR, WRONG, MISSED } = E;
   const TENTATIVE = 6;
+  const SUSPECT = 7; // a live reading suggests a mistake here; the double-check has not decided yet (never a stop by itself)
+
+  // Timing marks for each live reading (?debug=1 shows them on screen; tests read window.__sabaqDiag):
+  //  e2e   newest audio of the reading reached the page -> its words came back from the server
+  //  wait  server: audio arrived -> model started on it;  ms  the model's own time
+  //  net   e2e - wait - ms: the network both ways plus the phone's own queueing
+  //  align words came back -> Quran position updated;  paint  words came back -> highlight drawn
+  const Diag = { on: /[?&]debug=1/.test(location.search), rows: [], pending: null,
+    add(r) { this.rows.push(r); if (this.rows.length > 300) this.rows.shift(); },
+    med(k) { const a = this.rows.map(r => r[k]).filter(v => v != null).sort((x, y) => x - y); return a.length ? Math.round(a[a.length >> 1]) : null; },
+    p90(k) { const a = this.rows.map(r => r[k]).filter(v => v != null).sort((x, y) => x - y); return a.length ? Math.round(a[Math.min(a.length - 1, Math.floor(a.length * 0.9))]) : null; },
+    summary() { const o = { n: this.rows.length }; for (const k of ['e2e', 'wait', 'ms', 'net', 'align', 'paint']) o[k] = this.med(k) + '/' + this.p90(k); return o; } };
+  window.__sabaqDiag = Diag;
 
   let T = new E.Tracker(M); // committed state
   let P = null;             // live preview (committed + words still being recognised)
@@ -148,7 +161,8 @@
   function visual(view, p, hc) {
     const s = view.state[p];
     let v;
-    if (s === PENDING && T.state[p] === PENDING && p < hc && p >= view.c) v = TENTATIVE; // held progress
+    if (p === ModelMic.suspectAt && T.state[p] === PENDING && T.stopped !== p) v = SUSPECT;
+    else if (s === PENDING && T.state[p] === PENDING && p < hc && p >= view.c) v = TENTATIVE; // held progress
     else if (view === T) v = s;
     else if (T.state[p] !== PENDING) v = T.state[p];
     else v = s === PENDING ? PENDING : TENTATIVE; // preview words are not settled: show progress, never a mistake
@@ -200,6 +214,7 @@
     lastCursor = c;
     renderTally();
     renderStatus();
+    if (Diag.pending) { const d = Diag.pending; Diag.pending = null; d.paint = performance.now() - d.rx; Diag.add(d); }
   }
 
   let userScrolledAt = 0;
@@ -251,7 +266,7 @@
       return;
     }
     if (live && Input.kind === 'model' && !ModelMic.ready && ModelMic.remote) {
-      st.dataset.live = 'finding'; tx.textContent = 'Connecting to Sabaq\'s speech server… You can start reciting.'; return;
+      st.dataset.live = 'finding'; tx.textContent = ModelMic.retries ? 'Reconnecting to Sabaq\'s speech server… Keep reciting; nothing is lost.' : 'Connecting to Sabaq\'s speech server… You can start reciting.'; return;
     }
     if (live && Input.kind === 'model' && !ModelMic.ready) {
       st.dataset.live = 'finding';
@@ -791,11 +806,11 @@
       const done = this.sent.get(m.seg) || 0;
       if (m.audio.length > done) { this.send({ t: 'chunk', seg: m.seg }, m.audio.subarray(done)); this.sent.set(m.seg, m.audio.length); }
       while (this.sent.size > 8) this.sent.delete(this.sent.keys().next().value);
-      this.send({ t: 'run', kind: m.kind, seg: m.seg, len: m.audio.length, whole: !!m.whole });
+      this.send({ t: 'run', kind: m.kind, seg: m.seg, len: m.audio.length, whole: !!m.whole, cap: m.cap });
     }
     // streaming: more audio of the phrase being recited (the server reads it as it comes)
-    sendChunk(seg, pcm, whole) {
-      this.send({ t: 'chunk', seg, live: 1, whole: !!whole }, pcm);
+    sendChunk(seg, pcm, whole, cap) {
+      this.send({ t: 'chunk', seg, live: 1, whole: !!whole, cap }, pcm);
       this.sent.set(seg, (this.sent.get(seg) || 0) + pcm.length);
       while (this.sent.size > 8) this.sent.delete(this.sent.keys().next().value);
     }
@@ -831,7 +846,7 @@
   const SLOW_MS = +new URLSearchParams(location.search).get('slowms') || 5000; // (dev: ?slowms= tests the slow-device mode)
   const ModelMic = {
     worker: null, ready: false, failed: false, files: {}, stream: null, src: null, node: null, sink: null,
-    on: false, seg: 0, inSpeech: false, buf: [], len: 0, pre: [], preLen: 0, run: 0, silence: 0,
+    on: false, seg: 0, inSpeech: false, suspectAt: -1, inflightF: null, retries: 0, buf: [], len: 0, pre: [], preLen: 0, run: 0, silence: 0,
     floor: 0.004, busy: false, finals: [], partial: null, lastPartial: 0, rs: null, frame: [], frameLen: 0, ms: [],
     busyKind: '', slowCached: false, chunkCached: 7, busyP: false, unsent: [], unsentLen: 0, streamSeg: -1, inflightP: 0, srvStream: 0, lastLive: { seg: -1, len: 0 }, judging: null, busyF: false, lanes: 1, pendingFinal: new Set(), cutNow: false, cutAt: 0, cutMid: new Set(), costA: 1000, perSec: [], agree: { seg: -1, prev: [], done: 0, locked: [] }, judgedSeg: 0, threads: 1, chain: Promise.resolve(), audioOf: new Map(), verifyWait: null, frames: 0, level: 0, recent: [], voicedN: 0, ctx: null, nonzero: false, watch: 0, rebuilt: false,
 
@@ -844,12 +859,7 @@
       if (this.worker) return;
       if (!local && asrServer) {
         this.remote = true;
-        this.worker = new RemoteASR(asrServer, wasOpen => {
-          // the server went away (or never answered): carry on with the model in the browser
-          this.worker = null; this.remote = false; this.ready = false; this.busy = false; this.busyKind = ''; this.busyP = this.busyF = false; this.inflightP = 0; this.pendingFinal.clear();
-          if (wasOpen) toast('Lost the speech server. Continuing with the model on this device.', 5000);
-          this.init(true); renderStatus();
-        });
+        this.worker = new RemoteASR(asrServer, wasOpen => this.lost(wasOpen));
         this.worker.onmessage = e => this.onMessage(e.data);
         return;
       }
@@ -870,12 +880,47 @@
       const slowX = +(new URLSearchParams(location.search).get('asrslow') || 0);
       this.worker.postMessage({ type: 'load', slow: slowX > 1 ? slowX : 0 });
     },
+    // The server connection dropped (a tunnel hiccup, the server restarting, the phone switching networks).
+    // Reconnect first (the phrase in progress is re-sent in full); only after ~7 s of failed tries does the
+    // slower model on the phone take over, said on screen, and the server is tried again every 15 s.
+    lost(wasOpen) {
+      this.worker = null; this.ready = false; this.busy = false; this.busyKind = ''; this.busyP = this.busyF = false; this.inflightP = 0;
+      this.streamSeg = -1; this.unsent = []; this.unsentLen = 0; this.lastLive = { seg: -1, len: 0 };
+      if (this.verifyWait) { const f = this.verifyWait; this.verifyWait = null; f(null); }
+      if (this.inflightF && this.inflightF.seg >= 0) this.finals.unshift(this.inflightF);
+      this.inflightF = null;
+      this.retries = (this.retries || 0) + 1;
+      const waits = [300, 1000, 2000, 4000];
+      if (this.retries <= waits.length) {
+        this.remote = true;
+        if (this.retries === 1 && wasOpen) toast('Reconnecting to Sabaq\'s speech server…', 3000);
+        clearTimeout(this.retryTimer);
+        this.retryTimer = setTimeout(() => { if (!this.worker) this.init(); }, waits[this.retries - 1]);
+        renderStatus(); return;
+      }
+      this.retries = 0; this.remote = false; this.pendingFinal.clear();
+      toast('Can\'t reach Sabaq\'s speech server. Using the slower model on this phone for now; Sabaq switches back when the server returns.', 7000);
+      this.init(true); renderStatus();
+      clearInterval(this.probeTimer);
+      this.probeTimer = setInterval(async () => {
+        if (this.remote || !asrServer) { clearInterval(this.probeTimer); return; }
+        if (this.inSpeech || this.busy || this.finals.length) return;   // (not in the middle of a phrase)
+        const base = asrServer.replace(/^ws/, 'http').replace(/\/asr$/, '');
+        const h = await fetch(base + '/health', { cache: 'no-store', mode: 'cors' }).then(x => (x.ok ? x.json() : null)).catch(() => null);
+        if (!h || !h.ready || this.remote || this.inSpeech || this.busy) return;
+        clearInterval(this.probeTimer);
+        try { this.worker && this.worker.terminate(); } catch (e) { /* gone */ }
+        this.worker = null; this.ready = false; this.init();
+        toast('Back on Sabaq\'s speech server.', 2500);
+      }, 15000);
+    },
     onMessage(m) {
+      if (m.type === 'bye') return; // the server is restarting: its closing connection starts the reconnect
       if (m.type === 'progress') {
         if (m.total) this.files[m.file] = { loaded: m.loaded, total: m.total };
         if (this.on) renderStatus();
       } else if (m.type === 'ready') {
-        this.updateSpeed(); this.ready = true; this.threads = m.threads || 1; this.lanes = m.lanes || 1; this.srvStream = m.stream || 0; this.inflightP = 0; this.models = m.models || null; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
+        this.updateSpeed(); this.ready = true; this.retries = 0; this.threads = m.threads || 1; this.lanes = m.lanes || 1; this.srvStream = m.stream || 0; this.inflightP = 0; this.models = m.models || null; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
       } else if (m.type === 'error') {
         this.failed = true;
         toast('Could not download the speech model. Check the connection and tap the mic again.', 6000);
@@ -894,6 +939,9 @@
           if (m.seg === this.lastLive.seg && m.len <= this.lastLive.len) { this.pump(); return; }
           this.lastLive = { seg: m.seg, len: m.len };
         }
+        if (m.kind !== 'partial') this.inflightF = null;
+        let d = null;
+        if (m.kind === 'partial' && m.cap != null) { const rx = performance.now(); d = { seg: m.seg, rx, e2e: rx - m.cap, wait: m.wait, ms: m.ms, net: rx - m.cap - (m.wait || 0) - (m.ms || 0) }; }
         if (window.__asrLog) window.__asrLog.push({ kind: m.kind, seg: m.seg, ms: m.ms, secs: m.secs, at: performance.now(), text: m.text + (m.gap != null ? '  (gap ' + m.gap.toFixed(2) + ')' : '') }); // dev-only test log
         if (m.kind === 'final') this.chain = this.chain.then(() => this.judge(m.text, m.seg)).catch(() => {});
         else if (m.kind === 'verify' || m.kind === 'verifyc') { const f = this.verifyWait; this.verifyWait = null; if (f) f(m.text); }
@@ -902,7 +950,7 @@
           // (two lanes: the earlier phrase may not be judged yet, or is being double-checked; its words come
           // first, so this one only moves the highlight for now, at once, and locks nothing in)
           if ([...this.pendingFinal].some(x => x < m.seg) || (this.judging != null && this.judging < m.seg)) this.peek(m.text, m.seg, whole, gap);
-          else this.chain = this.chain.then(() => this.live(m.text, m.seg, whole, gap)).catch(() => {});
+          else this.chain = this.chain.then(() => { this.live(m.text, m.seg, whole, gap); if (d) { d.align = performance.now() - d.rx; Diag.pending = d; render(false); } }).catch(() => {});
         }
         this.updateSpeed(); this.showSpeed();
         this.pump();
@@ -930,6 +978,18 @@
       setMic('listening');
       this.meter();
     },
+    // iPhone Safari pauses the microphone (and may close the connection) when the page goes to the background or
+    // the screen locks. Going away: the phrase being heard is finished now (so it is judged, not glued to what
+    // comes after). Coming back: the audio is resumed and checked; a microphone the system took away needs a tap.
+    onVisibility() {
+      if (!this.on) return;
+      if (document.visibilityState === 'hidden') { if (this.inSpeech) this.endSegment(); return; }
+      const tr = this.stream && this.stream.getAudioTracks()[0];
+      if (!tr || tr.readyState === 'ended') { toast('The microphone paused while Sabaq was in the background. Tap the mic to carry on.', 5000); this.stop(); return; }
+      if (this.ctx && this.ctx.state !== 'running') this.ctx.resume().catch(() => {});
+      if (this.remote && !this.worker) this.init();
+      this.frames = 0; this.rebuilt = false; clearTimeout(this.watch); this.watch = setTimeout(() => this.check(), 2000);
+    },
     // mic -> processor (kept running through a silent gain) -> 16 kHz frames
     async connect(a) {
       this.ctx = a;
@@ -937,7 +997,14 @@
       a.onstatechange = () => { if (this.on && this.ctx === a && a.state !== 'running' && a.state !== 'closed') a.resume().catch(() => {}); };
       this.src = a.createMediaStreamSource(this.stream);
       this.sink = a.createGain(); this.sink.gain.value = 0;
-      this.rs = { ratio: a.sampleRate / 16000, pos: 0, acc: 0, n: 0 };
+      // (the microphone runs at the device's rate, usually 48 kHz on iPhone, 44.1 or 48 kHz elsewhere, lower over
+      // some Bluetooth headsets: it is converted to the 16 kHz the model was trained on. Above ~19 kHz, sound above
+      // 7 kHz is first filtered out (a 4th-order low-pass), so "s"/"sh" hiss can't fold into the speech band)
+      const fsIn = a.sampleRate, w = 2 * Math.PI * 7600 / fsIn, cw = Math.cos(w);
+      const sec = Q => { const al = Math.sin(w) / (2 * Q), a0 = 1 + al; return { b0: (1 - cw) / 2 / a0, b1: (1 - cw) / a0, b2: (1 - cw) / 2 / a0, a1: -2 * cw / a0, a2: (1 - al) / a0 }; };
+      this.rs = { ratio: fsIn / 16000, pos: 0, acc: 0, n: 0, last: 0, s1: 0, s2: 0, t1: 0, t2: 0,
+        lp: fsIn > 19000 ? [sec(0.5412), sec(1.3066)] : null };   // (4th-order Butterworth: flat to ~6 kHz)
+      this.rate = fsIn;
       this.nonzero = false; this.frames = 0;
       // An AudioWorklet hands the audio over every ~21 ms on the audio thread (nothing is lost while the page is
       // busy); the older ScriptProcessor only every ~85 ms. The older one stays as the fallback.
@@ -1011,15 +1078,22 @@
     onAudio(input) {
       if (!this.on) return;
       if (!this.nonzero) for (let i = 0; i < input.length; i += 64) if (input[i] !== 0) { this.nonzero = true; break; }
-      const rs = this.rs;
+      const rs = this.rs, f = rs.lp;
+      const out = v => { this.frame.push(v); if (this.frame.length === 320) { this.onFrame(Float32Array.from(this.frame)); this.frame = []; } };
       for (let i = 0; i < input.length; i++) {
-        rs.acc += input[i]; rs.n++;
-        rs.pos += 1;
-        if (rs.pos >= rs.ratio) {
-          rs.pos -= rs.ratio;
-          this.frame.push(rs.acc / rs.n); rs.acc = 0; rs.n = 0;
-          if (this.frame.length === 320) { this.onFrame(Float32Array.from(this.frame)); this.frame = []; }
+        let x = input[i];
+        if (f) {
+          const g = f[0], h = f[1];
+          let y = g.b0 * x + rs.s1; rs.s1 = g.b1 * x - g.a1 * y + rs.s2; rs.s2 = g.b2 * x - g.a2 * y; x = y;
+          y = h.b0 * x + rs.t1; rs.t1 = h.b1 * x - h.a1 * y + rs.t2; rs.t2 = h.b2 * x - h.a2 * y; x = y;
         }
+        if (rs.ratio < 1) { // (fewer than 16000 samples a second: fill in between them)
+          while (rs.pos < 1) { out(rs.last + (x - rs.last) * rs.pos); rs.pos += rs.ratio; }
+          rs.pos -= 1; rs.last = x; continue;
+        }
+        rs.acc += x; rs.n++;
+        rs.pos += 1;
+        if (rs.pos >= rs.ratio) { rs.pos -= rs.ratio; out(rs.acc / rs.n); rs.acc = 0; rs.n = 0; }
       }
     },
     // voice activity: a phrase starts on 60 ms of sound above the noise floor and ends after 650 ms of quiet
@@ -1070,17 +1144,19 @@
           const out = new Float32Array(this.unsentLen); let o = 0;
           for (const b of this.unsent) { out.set(b, o); o += b.length; }
           this.unsent = []; this.unsentLen = 0;
-          this.worker.sendChunk(this.seg, out, this.silence >= 100);
+          this.worker.sendChunk(this.seg, out, this.silence >= 100, Math.round(performance.now()));
         }
       }
       if (this.silence >= 650) { this.endSegment(); return; }
+      // (streaming to the server: after 7 s only at a real pause, 300 ms: at fast recitation a 160 ms gap can fall
+      // between two words of one breath, leaving a word alone in a sliver of audio that both models mishear)
       // A long phrase is cut sooner (the small model drops the last words of long phrases): after 7 s at a
       // short pause between words (160 ms, longer than the stops inside a word), after 14 s at a 100 ms
       // pause (never inside a fading word ending), and at 25 s regardless.
       // (an early cut waits for the next short gap between words: cutting inside a word garbles it, and both
       // readings would then hear the same garble; after 1.5 s it cuts anyway and the word at the cut is not judged)
       const cutGap = this.cutNow && this.silence >= 80, cutLate = this.cutNow && performance.now() - this.cutAt > 1500;
-      if (cutGap || cutLate || (this.len >= 16000 * this.chunkSecs() && this.silence >= 160) || (this.len >= 16000 * 14 && this.silence >= 100) || this.len >= 16000 * 25) {
+      if (cutGap || cutLate || (this.len >= 16000 * this.chunkSecs() && this.silence >= (this.streaming() ? 300 : 160)) || (this.len >= 16000 * 14 && this.silence >= 100) || this.len >= 16000 * 25) {
         if (cutLate && !cutGap) this.cutMid.add(this.seg);
         this.cutNow = false;
         this.endSegment(); this.inSpeech = true; this.seg++; this.silence = 0; this.lastPartial = performance.now(); this.lastPartialLen = 0;
@@ -1098,7 +1174,7 @@
       if (!(this.streamSeg === this.seg && this.streaming()) && (this.twoLanes() ? !this.busyP : (!this.busy && !this.finals.length)) && !this.slowDevice() && (due || gap) && this.len > (this.lastPartialLen || 0) + (fast ? 1280 : 3200) && this.len > 16000 * (fast ? 0.5 : this.remote ? 0.6 : 1.2)) {
         this.lastPartial = performance.now(); this.lastPartialLen = this.len;
         // (if the audio so far ends in a short pause, its last word is complete: the reading keeps it)
-        this.partial = { kind: 'partial', seg: this.seg, audio: this.join(), whole: this.silence >= 100 };
+        this.partial = { kind: 'partial', seg: this.seg, audio: this.join(), whole: this.silence >= 100, cap: Math.round(performance.now()) };
         this.pump();
       }
     },
@@ -1157,6 +1233,7 @@
         if (at >= 0 && A.cutFor !== at) { A.cutFor = at; this.cutNow = true; this.cutAt = performance.now(); }
         if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, at: performance.now(), text: '  suspect ' + (at >= 0 ? M.disp[at] : '-') + ' (before: ' + (A.suspect >= 0 ? M.disp[A.suspect] : '-') + ') rest=[' + rest.join(' ') + ']' + (this.cutNow ? ' CUT' : '') }); // dev-only
         A.suspect = at;
+        if (this.suspectAt !== at) { this.suspectAt = at; render(false); }
       }
       if (seg === this.seg && this.inSpeech && (words.length > n || tail)) preview(words.slice(n).join(' '), true, tail);
       else { P = null; render(); }
@@ -1204,7 +1281,9 @@
     // Only when both readings show the mistake does Sabaq stop.
     async judge(text, seg) {
       this.judging = seg;
-      try { await this.judgeNow(text, seg); } finally { this.judging = null; }
+      this.snapCur = null;
+      if (T.stopped >= 0) this.snaps = [];
+      try { await this.judgeNow(text, seg); } finally { this.judging = null; if (this.snapCur) { (this.snaps = this.snaps || []).push(this.snapCur); if (this.snaps.length > 3) this.snaps.shift(); } if (this.suspectAt >= 0) { this.suspectAt = -1; render(false); } }
     },
     async judgeNow(text, seg) {
       this.judgedSeg = Math.max(this.judgedSeg, seg);
@@ -1213,6 +1292,8 @@
       if (midCut) text = E.tokenize(text).slice(0, -1).join(' ');
       const full = E.tokenize(text);
       text = this.unlocked(text, seg);
+      // (what the tracker was before this phrase's judged words, to go back to if the next phrase needs it)
+      this.snapCur = { seg, T: T.clone(), text, locked: this.agree.seg === seg ? this.agree.locked.slice() : [] };
       // (nothing new: still arm the end-of-phrase check, which judges a slip on the ayah's last word)
       if (!text.trim()) { commit('', true, true); return; }
       const stopsWith = t => { const C = T.clone(); const n0 = C.events.length; C.feed(E.tokenize(t)); C.flush(); return C.events.slice(n0).find(e => e.type === 'stop') || null; };
@@ -1230,26 +1311,78 @@
       // the second reading also hears the end of the previous phrase: a different context makes the model
       // decode afresh (a garble caused by how the audio was cut, or by a fast join, is then not repeated)
       const prev = this.audioOf.get(seg - 1);
-      const ctxAudio = prev ? prev.subarray(Math.max(0, prev.length - 24000)) : null;
-      let alt = await this.verify(audioSeg, ctxAudio);
       // (Whisper can get stuck repeating a phrase, or time out: a broken second reading confirms nothing. Then the
       // fast model reads the same audio again, with the end of the previous phrase in front: a different decoding)
-      const broken = t => { const w = E.tokenize(t || ''); return !w.length || (w.length > 6 && new Set(w).size <= w.length / 3); };
-      if (broken(alt) && this.remote && this.models && this.models.verify && this.models.verify !== this.models.live) {
-        if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'second reading broken, reading again with the fast model' }); // dev-only
-        alt = await this.verify(audioSeg, ctxAudio, 'verifyc');
+      // (a repeated run of 3+ words, e.g. "اليك البصوخاس ان ينقضني اليك البصوخاس ان", is Whisper looping too)
+      const broken = t => { const w = E.tokenize(t || ''); if (!w.length || (w.length > 6 && new Set(w).size <= w.length / 3)) return true;
+        const seen = new Set(); for (let i = 0; i + 3 <= w.length; i++) { const g = w.slice(i, i + 3).join(' '); if (seen.has(g)) return true; seen.add(g); } return false; };
+      const read2 = async (audio, ctx) => {
+        let a = await this.verify(audio, ctx);
+        if (broken(a) && this.remote && this.models && this.models.verify && this.models.verify !== this.models.live) {
+          if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'second reading broken, reading again with the fast model' }); // dev-only
+          a = await this.verify(audio, ctx, 'verifyc');
+        }
+        if (window.__asrLog) window.__asrLog.push({ kind: 'verify', seg, text: a, at: performance.now() }); // dev-only test log
+        return a;
+      };
+      let altRest = null;
+      // The suspected word may belong to the PREVIOUS phrase: fast recitation cuts phrases between any two words, so
+      // a word can end up alone in a 0.3 s phrase and be misheard there, and the tracker only judges a word once it
+      // hears the words after it, which arrive in this phrase. Checking only this phrase's audio would then confirm
+      // nothing. So the tracker goes back to where the previous phrase began (nothing was shown as a mistake since),
+      // the double-check reads both phrases' audio together, and both phrases are judged again from both readings.
+      // (the latest earlier phrase that began before the suspected word (the word at the cursor when a phrase began may
+      // have been said at the end of the phrase before it), up to 3 phrases and 14 s back; a phrase
+      // in between may have been only a breath or a cough)
+      const snaps = this.snaps || [];
+      let k = snaps.length - 1;
+      while (k >= 0 && !(snaps[k].T.c < st1.pos || (k === 0 && snaps[k].T.c === st1.pos))) k--;
+      const S = k >= 0 ? snaps[k] : null;
+      let span = null;
+      if (S && S.T.c > 0 && T.stopped < 0) {
+        span = [];
+        for (let g = S.from != null ? S.from : S.seg; g <= seg; g++) { const a = this.audioOf.get(g); if (a) span.push(a); else if (g === S.seg || g === seg) { span = null; break; } }
+        if (span && span.reduce((n, a) => n + a.length, 0) > 16000 * 14) span = null;
       }
-      if (window.__asrLog) window.__asrLog.push({ kind: 'verify', seg, text: alt, at: performance.now() }); // dev-only test log
-      // drop the words of that context: the second reading starts where this phrase's first word is found
-      let altW = alt ? E.tokenize(alt) : [];
-      if (midCut) altW = altW.slice(0, -1);
-      if (prev && full.length) { const i = altW.indexOf(full[0]); if (i > 0 && i <= 6) altW = altW.slice(i); }
-      const altRest = altW.length ? this.unlocked(altW.join(' '), seg, !!prev) : '';
+      if (span) {
+        clearTimeout(idleTimer);
+        const both = new Float32Array(span.reduce((n, a) => n + a.length, 0)); let o = 0; for (const a of span) { both.set(a, o); o += a.length; }
+        const pp = this.audioOf.get((S.from != null ? S.from : S.seg) - 1);
+        const alt2 = await read2(both, pp ? pp.subarray(Math.max(0, pp.length - 24000)) : null);
+        let w2 = E.tokenize(alt2 || '');
+        if (midCut) w2 = w2.slice(0, -1);
+        // (that reading also has the words already tracked before the previous phrase's judged part, and maybe the
+        // context's: it is cut after the Quran's own words just before that point)
+        let at = alignAfter(w2, M.keys.slice(Math.max(0, S.T.c - 3), S.T.c), true);
+        // (or where the words that come next start: Whisper sometimes leaves out the first word of what it hears)
+        for (let i = 0; at < 0 && i < Math.min(3, w2.length); i++) for (let d = 0; d < 3 && S.T.c + d < M.N; d++) if (E.sim(w2[i], M.keys[S.T.c + d]) >= (d ? 0.84 : 0.7)) { at = i; break; }
+        if (at >= 0 && !broken(alt2)) {
+          const strict = T.strict;
+          T = S.T.clone(); T.strict = strict; P = null;
+          const said = [...E.tokenize(S.text)];
+          for (const q of snaps.slice(k + 1)) said.push(...q.locked, ...E.tokenize(q.text));
+          text = [...said, ...this.snapCur.locked, ...E.tokenize(text)].join(' ');
+          altRest = w2.slice(at).join(' ');
+          // (these phrases are now one: going back again later starts where they began)
+          this.snapCur = { seg, from: S.from != null ? S.from : S.seg, T: S.T.clone(), text, locked: [] };
+          if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'went back ' + (seg - S.seg) + ' phrase(s): first [' + text + '] second [' + altRest + ']' }); // dev-only
+        }
+      }
+      if (altRest == null) {
+        const ctxAudio = prev ? prev.subarray(Math.max(0, prev.length - 24000)) : null;
+        const alt = await read2(audioSeg, ctxAudio);
+        // drop the words of that context: the second reading starts where this phrase's first word is found
+        let altW = alt ? E.tokenize(alt) : [];
+        if (midCut) altW = altW.slice(0, -1);
+        if (prev && full.length) { const i = altW.indexOf(full[0]); if (i > 0 && i <= 6) altW = altW.slice(i); }
+        altRest = altW.length ? this.unlocked(altW.join(' '), seg, !!prev) : '';
+      }
       // The second reading, by a different model, hears no mistake at all (and as many words): the first reading was
       // garbled as a whole (fast recitation can turn "وهو حسير ولقد زينا" into "بسم الله الرحمن الرحيم"), and
       // mending it word by word would keep its garbage. No stop: a stop needs both readings to hear the mistake.
       const altN = E.tokenize(altRest).length;
-      if (altN && altN >= E.tokenize(text).length - 1 && !stopsWith(altRest)) {
+      const fitsAll = t => { const C = T.clone(); const n0 = C.events.length; C.feed(E.tokenize(t)); C.flush(); return !C.events.slice(n0).some(e => /^(stop|mistake|relocated)$/.test(e.type)) && C.stats.extras === T.stats.extras && C.lost.length <= T.lost.length; };
+      if (altN && altN >= E.tokenize(text).length - 1 && fitsAll(altRest)) {
         if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'second reading clean: [' + altRest + ']' }); // dev-only
         commit(altRest, true, true); return;
       }
@@ -1284,13 +1417,13 @@
       if (this.twoLanes()) {
         // the server reads a final reading and a live reading side by side
         if (!this.busyF && this.finals.length) {
-          const job = this.finals.shift(); this.busyF = true; this.busyKind = job.kind; renderStatus();
+          const job = this.finals.shift(); this.busyF = true; this.busyKind = job.kind; this.inflightF = job; renderStatus();
           this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio });
         }
         if (!this.busyP && this.partial) {
           const job = this.partial; this.partial = null; this.partialWhole = !!job.whole;
           this.inflightP++; this.busyP = this.inflightP >= this.maxP();
-          this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio, whole: job.whole });
+          this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio, whole: job.whole, cap: job.cap });
         }
         this.busy = this.busyF || this.busyP;
         return;
@@ -1300,10 +1433,21 @@
       if (job === this.partial) { this.partial = null; this.partialWhole = !!job.whole; }
       if (!job) return;
       this.busy = true; this.busyKind = job.kind;
-      if (job.kind !== 'partial') renderStatus();
+      if (job.kind !== 'partial') { renderStatus(); if (this.remote) this.inflightF = job; }
       this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio }, [job.audio.buffer]);
     },
   };
+
+  document.addEventListener('visibilitychange', () => ModelMic.onVisibility());
+  window.addEventListener('pagehide', () => { if (ModelMic.on) ModelMic.stop(); });
+
+  // ?debug=1: the timing marks on screen, once a second
+  if (Diag.on) {
+    const box = document.createElement('div');
+    box.style.cssText = 'position:fixed;left:8px;bottom:calc(8px + env(safe-area-inset-bottom,0px));z-index:99;font:11px/1.35 ui-monospace,monospace;background:var(--paper,#fff);color:var(--ink,#000);opacity:.88;padding:4px 6px;border-radius:6px;pointer-events:none;white-space:pre';
+    document.body.append(box);
+    setInterval(() => { const s = Diag.summary(); box.textContent = 'live readings ' + s.n + ' (median/p90 ms)\nround trip ' + s.e2e + '  model ' + s.ms + '\nserver wait ' + s.wait + '  net ' + s.net + '\nalign ' + s.align + '  drawn ' + s.paint + '\nmic ' + (ModelMic.capture || '-') + ' ' + (ModelMic.rate || '-') + ' Hz' + (ModelMic.remote ? ' · server' : ' · on phone'); }, 1000);
+  }
 
   // Inside claude.ai, phones (and browsers without Claude dictation) can't use the microphone: say where it works.
   function showSiteNote() { if (IN_CLAUDE) $('siteNote').hidden = false; }

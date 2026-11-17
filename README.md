@@ -99,7 +99,91 @@ A page served by the server finds it by itself (it answers `/health`). Any other
 `?asr=wss://host/asr` (remembered; `?asr=off` to stop). A phone needs HTTPS for the microphone, so the server must
 be reached through HTTPS: a cloud host (`server/Dockerfile` runs as a free Hugging Face Docker Space, port 7860)
 or a tunnel to a computer running it. `MODEL=…` picks another Quran Whisper ONNX model, `THREADS=…` the CPU
-threads. If the server goes away mid-recitation, the app carries on with the in-browser model.
+threads. If the connection drops mid-recitation (a tunnel hiccup, the server restarting, the phone changing
+network), the phone reconnects (after 0.3, 1, 2 and 4 s) and re-sends the phrase in progress. Only after that does the
+slower in-browser model take over, said on screen, and the phone tries the server again every 15 s and switches back.
+
+### Server settings (environment variables)
+
+| Variable | Default | What it does |
+|---|---|---|
+| `PORT` | 8787 | HTTP + WebSocket port |
+| `THREADS` | half the cores, max 4 | CPU threads per model |
+| `MAX_CONNS` | 24 | reciters connected at once; more are refused (the phone falls back) |
+| `MAX_JOBS` | 6 | phrase readings + double-checks one reciter may have waiting |
+| `ORIGINS` | (any) | comma list of sites allowed to connect, e.g. `https://hassaanth.github.io` |
+| `PAD` | 0.6 | seconds of faint noise after each live reading (see Streaming) |
+| `LOG_EVERY` | 60 | seconds between activity summaries in the log; 0 = off |
+| `HF_CACHE` | system temp | where the models are downloaded (keep it on a persistent disk) |
+
+Reciters take turns on each model lane, so one person's long backlog can't hold up the others. Each connection
+is checked every 20 s (a phone that vanished is let go within ~40 s). On SIGTERM/SIGINT the server stops taking
+new reciters, tells the open ones (their phones reconnect by themselves), lets running readings finish, and exits.
+
+`GET /health` reports: ready, models, connections, memory, and rolling timings per kind of reading
+(`msMedian`/`msP90` = model time, `waitMedian`/`waitP90` = audio arrived → model started).
+
+### Deploying the server permanently
+
+The website stays on GitHub Pages; only the speech server needs a host that is always on, with HTTPS (the phone
+needs it for the microphone) and WebSockets. Measured needs: about 1.3 GB of memory with both models loaded, and
+CPU only (no GPU). See "Measured" below for how much CPU.
+
+1. Build and run the container on the host (any Linux VM, or a container service):
+   ```
+   docker build -f server/Dockerfile -t sabaq .
+   docker run -d --restart=always -p 8787:7860 -e THREADS=2 -e ORIGINS=https://hassaanth.github.io -v sabaq-models:/tmp/sabaq-hf-cache sabaq
+   ```
+   or without Docker: `cd server && npm install && PORT=8787 THREADS=2 node asr-server.js` under a process manager
+   (systemd, pm2) that restarts it.
+2. Put HTTPS in front (Caddy does it in one line: `your.domain { reverse_proxy localhost:8787 }`), or use the host's
+   own HTTPS.
+3. Point the website at it: set `"url": "https://your.domain"` in `asr-url.json` and push; every phone then finds
+   the server by itself. (Or open the site once with `?asr=wss://your.domain/asr`.)
+4. Check: `https://your.domain/health` shows `"ready": true`.
+
+Options: a small always-on VM (2 vCPU / 4 GB, roughly $4–6 a month at Hetzner or similar), or Oracle Cloud's
+Always-Free Arm VM (sherpa-onnx ships Linux arm64 builds). A free Hugging Face Docker Space also runs the Dockerfile,
+but it sleeps when unused and wakes slowly, so the first recitation after a quiet spell falls back to the phone.
+
+### Measured (November 2026, Al-Mulk 1–5, phone CPU emulated at 4× slower, server on this PC)
+
+Where the time goes for one live reading (`?debug=1` shows these on screen; median / 90th percentile, ms):
+
+| Stage | 4 server threads | 2 server threads (≈ small cloud VM) |
+|---|---|---|
+| newest audio reaches the page → words back (round trip) | 150 / 300 | 162 / 355 |
+| … of which the model | 110 / 250 | 123 / 303 |
+| … of which waiting on the server | 17 / 66 | 26 / 72 |
+| … of which network (local here; add your link's round trip) | 1 / 3 | 1 / 3 |
+| words back → Quran position updated | 0 / 1 | 0 / 1 |
+| words back → highlight drawn | 4 / 7 | 4 / 7 |
+| **word ends → highlight moves past it** | **0.4–0.5 s / 0.8–0.9 s** | **0.4 s / 0.8 s** |
+
+So the page itself adds under 10 ms; the rest is the model (it writes a word once most of it has been said) plus
+the round trip. Server memory: about 1.0–1.3 GB. A phrase's full reading takes ~160 ms (p90 ~290 ms); a
+double-check with Whisper ~1.7 s (p90 2.2 s), on its own lane so it never holds up the live highlight.
+
+Fast recitation (2.2×, time-stretched Alafasy), runs without any false mark: at the start of this round 1 of 2
+lag-test runs, and 0 of 2 lag runs + 0 of 1 session run just before the fix below; after it, 2 of 2 lag runs and
+3 of 6 runs of the harder `fast22` session (`ONLY=fast22 node tests/sessions.cjs`: shorter breaths). Small samples:
+2.2× is better, not solved. Normal speed: no false marks before or after.
+Disconnect test (server killed 14 s in): reconnected by itself, 60/60 words followed, no false marks.
+
+### How a suspected mistake is checked
+
+1. A live reading that sees a mistake only marks the word "checking" (dashed amber underline) and ends the phrase
+   early, so the check comes at once. It never stops anyone by itself.
+2. The phrase's full reading must show the mistake too.
+3. A second, different model (Whisper) reads the audio again, with the end of the previous phrase in front. If
+   Whisper loops (a repeated 3-word run) or returns nothing, the fast model re-reads with that context instead.
+4. **The right audio:** if the suspected word was heard in an earlier phrase (fast recitation can cut a phrase
+   right next to a word), the tracker goes back to where that phrase began (up to 3 phrases / 14 s), the second
+   reading covers all of that audio, and those phrases are judged again from both readings.
+5. A second reading that shows no mistake *and fits the Quran text* (no stray or unplaced words) clears it; a
+   reading that merely avoids a stop is not enough. Otherwise each word where the two readings differ is decided
+   by what fits the text, and the stop happens only if a mistake is left that both readings heard.
+The "checking" mark disappears once this is decided.
 
 ## Run it locally
 
@@ -132,6 +216,18 @@ node tests/engine.test.js     # 90 scenario tests, incl. teacher mode, moving on
 node tests/sessions.cjs       # realistic sessions through the real mic path (needs Playwright; see the file)
 node tests/stress.test.js     # 60,000-word noisy-recitation simulation
 ```
+
+### Testing on a real iPhone
+
+1. Start the server and the tunnel on the computer: `cd server && node start-public.js` (it prints the public
+   HTTPS address and publishes it in `asr-url.json`).
+2. On the iPhone, in Safari, open that address with `?debug=1` (e.g. `https://xxxx.trycloudflare.com/?debug=1`).
+   Allow the microphone. The corner box shows the timings, the capture path (`worklet` or `script`), the
+   microphone's real sample rate, and whether the server or the phone's own model is reading.
+3. Things to try: recite normally; recite fast; repeat a word and an ayah; pause 5 s; say a wrong word; skip a word;
+   start mid-surah; lock the screen for a few seconds and come back (it should say to tap the mic if iOS took the
+   microphone away); switch Wi-Fi off and on mid-ayah (it should say "Reconnecting…" and carry on).
+4. If something looks wrong, a screenshot of the debug box plus what you recited is enough to trace it.
 
 ## Files
 

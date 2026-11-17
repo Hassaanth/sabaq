@@ -125,7 +125,10 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-b
 .memorize .glide { opacity: 0 !important; }
 .w:hover { background: var(--veil); }
 .w.s1, .w.s6 { color: var(--ink); }
-.w.s6 { color: var(--ink); }
+/* predicted: heard by a live reading, not yet confirmed (a shade softer; it settles to full ink, or back to grey) */
+.w.s6 { color: var(--ink); color: color-mix(in srgb, var(--ink) 74%, var(--pending)); }
+/* possible mistake: a live reading heard something else here; the double-check decides (no stop until then) */
+.w.s7 { color: var(--ink); text-decoration: underline dashed var(--check); text-decoration-thickness: .07em; text-underline-offset: .42em; }
 .w.s2 { color: var(--ink); background: var(--check-bg); text-decoration: underline dotted var(--check); text-decoration-thickness: .07em; text-underline-offset: .42em; }
 .w.s3 { color: var(--ink); text-decoration: underline dotted var(--unclear); text-decoration-thickness: .06em; text-underline-offset: .42em; }
 .w.s4 { color: var(--miss); background: var(--miss-bg); }
@@ -150,6 +153,7 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-b
 .sw.u { border-bottom: 2px dotted var(--unclear); }
 .sw.x { background: var(--miss-bg); }
 .sw.m { border-bottom: 2px solid var(--miss); }
+.sw.c { border-bottom: 2px dashed var(--check); }
 .sw.f { background: var(--ok-bg); border-bottom: 2px solid var(--miss); }
 .legend .tick { color: var(--ok); font-weight: 600; }
 
@@ -272,6 +276,7 @@ textarea { width: 100%; min-height: 7.5rem; border: 1px solid var(--rule); backg
           <span><i class="sw x"></i>Wrong word</span>
           <span><i class="sw m"></i>Skipped</span>
           <span><i class="sw f"></i>Mistake, then fixed</span>
+          <span><i class="sw c"></i>Checking a possible mistake</span>
           <span><b class="tick">✓</b>Fixed after a stop</span>
         </div>
       </article>

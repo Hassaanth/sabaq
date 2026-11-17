@@ -48,8 +48,23 @@ function publish(url) {
     if (!(await healthy())) throw new Error('the speech server did not start');
   } else console.log('Speech server already running on port', PORT);
 
+  openTunnel();
+})().catch(e => { console.error(e.message); stopAll(); });
+
+// A free quick tunnel can stop answering after a while (its address stops resolving) without the process ending.
+// Its own public address is checked every minute; after 3 failures in a row, or if it exits, a new tunnel is
+// opened and its address published, so the website finds the server again by itself.
+let tunnel = null, current = null, fails = 0;
+setInterval(async () => {
+  if (!current) return;
+  let ok = false;
+  try { const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 10000); const r = await fetch(current + '/health', { signal: ctl.signal }); clearTimeout(tm); ok = r.ok; } catch (e) { /* down */ }
+  fails = ok ? 0 : fails + 1;
+  if (fails >= 3) { console.error(new Date().toISOString(), 'the public address stopped answering: opening a new tunnel'); fails = 0; current = null; const t = tunnel; tunnel = null; try { t.kill(); } catch (e) { /* gone */ } openTunnel(); }
+}, 60000);
+function openTunnel() {
   console.log('Opening the tunnel…');
-  const t = spawn(findCloudflared(), ['tunnel', '--no-autoupdate', '--url', `http://localhost:${PORT}`], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const t = tunnel = spawn(findCloudflared(), ['tunnel', '--no-autoupdate', '--url', `http://localhost:${PORT}`], { stdio: ['ignore', 'pipe', 'pipe'] });
   children.push(t);
   let done = false;
   const watch = buf => {
@@ -58,6 +73,7 @@ function publish(url) {
       done = true;
       const url = m[0];
       console.log('Public address:', url);
+      current = url; fails = 0;
       // wait until the address answers through Cloudflare, then publish it
       (async () => {
         for (let i = 0; i < 60; i++) { try { const r = await fetch(url + '/health'); if (r.ok) break; } catch (e) { /* not yet */ } await new Promise(r => setTimeout(r, 1000)); }
@@ -67,5 +83,9 @@ function publish(url) {
     }
   };
   t.stdout.on('data', watch); t.stderr.on('data', watch);
-  t.on('exit', code => { console.error('The tunnel stopped (' + code + ').'); stopAll(); });
-})().catch(e => { console.error(e.message); stopAll(); });
+  t.on('exit', code => {
+    if (tunnel !== t) return; // (replaced on purpose)
+    console.error('The tunnel stopped (' + code + '); opening a new one in 5 s.');
+    tunnel = null; current = null; setTimeout(openTunnel, 5000);
+  });
+}

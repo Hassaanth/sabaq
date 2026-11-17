@@ -15,6 +15,8 @@ const SESSIONS = {
   // fast and fluent: 67:1-5 at 1.7x, short breaths; nothing should be marked
   fast: { open: 67, rate: 1.7, script: [{ tap: true }, { pause: 1500 }, '67:1', { pause: 300 }, '67:2', { pause: 300 }, '67:3', { pause: 300 }, '67:4', { pause: 300 }, '67:5', { pause: 3000 }, { tap: true }],
     expect: r => r.tally.startsWith('60/') && !r.marks.wrong && !r.marks.missed && !r.marks.fixed },
+  // very fast (2.2x, hadr), short breaths: nothing should be marked (passes about half the time; see README)
+  fast22: { open: 67, rate: 2.2, script: [{ tap: true }, { pause: 1500 }, '67:1', { pause: 250 }, '67:2', { pause: 250 }, '67:3', { pause: 250 }, '67:4', { pause: 250 }, '67:5', { pause: 3000 }, { tap: true }], expect: r => !r.marks.wrong && !r.marks.missed && !r.marks.fixed },
   // hesitant: stops mid-ayah, thinks, restarts the ayah, carries on; nothing should be marked
   restart: { open: 67, rate: 1, script: [{ tap: true }, { pause: 1500 }, '67:1', { pause: 800 }, '67:2:1-5', { pause: 2500 }, '67:2', { pause: 700 }, '67:3:1-9', { pause: 3000 }, { tap: true }],
     expect: r => !r.marks.wrong && !r.marks.missed && !r.marks.fixed },
@@ -24,7 +26,7 @@ const SESSIONS = {
   const browser = await chromium.launch({ executablePath: process.env.CHROME, args: ['--autoplay-policy=no-user-gesture-required'] });
   let pass = 0, n = 0;
   for (const [name, S] of Object.entries(SESSIONS)) {
-    if (only.length && !only.includes(name)) continue;
+    if (only.length ? !only.includes(name) : name === 'fast22') continue;
     const ctx = await browser.newContext({ colorScheme: process.env.DARK ? 'dark' : 'light', viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true,
       userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1' });
     await ctx.addInitScript({ content: fs.readFileSync(path.join(P, 'tests/fake-mic.js'), 'utf8') + '\n' + fs.readFileSync(path.join(P, 'tests/user-sim.js'), 'utf8') + `

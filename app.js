@@ -818,8 +818,8 @@
   }
   // Where the speech server is: ?asr=wss://… (remembered; ?asr=off to stop), else the site's own server when
   // the page is served by one (it answers /health), else none (the model runs in the browser).
-  let asrServer = null;
-  const asrServerReady = (async () => {
+  let asrServer = null, reportTo = null;
+  async function findServer() {
     try {
       const q = new URLSearchParams(location.search).get('asr');
       if (q) store.set('asrServer', q === 'off' ? '' : q);
@@ -830,15 +830,36 @@
       if (r && r.ok && /json/.test(r.headers.get('content-type') || '')) { asrServer = location.origin.replace(/^http/, 'ws') + location.pathname.replace(/[^/]*$/, '') + 'asr'; return; }
       // A server announced on this site: a computer running Sabaq's server (server/start-public.js) publishes its
       // current public address in asr-url.json. Used only if it answers now; otherwise the in-browser model.
-      const a = await fetch('asr-url.json', { cache: 'no-store' }).then(x => (x.ok ? x.json() : null)).catch(() => null);
+      // (a query that changes every time: GitHub Pages' cache could otherwise hand out an address up to 10 minutes old)
+      const a = await fetch('asr-url.json?t=' + Date.now(), { cache: 'no-store' }).then(x => (x.ok ? x.json() : null)).catch(() => null);
       if (a && /^https:\/\//.test(a.url || '')) {
-        const base = a.url.replace(/\/+$/, ''), ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 3000);
+        const base = a.url.replace(/\/+$/, ''), ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 4000);
+        reportTo = base;
         const h = await fetch(base + '/health', { cache: 'no-store', mode: 'cors', signal: ctl.signal }).then(x => (x.ok ? x.json() : null)).catch(() => null);
         clearTimeout(t);
         if (h && h.ready) asrServer = base.replace(/^https/, 'wss') + '/asr';
       }
     } catch (e) { /* no server here */ }
-  })();
+  }
+  const asrServerReady = findServer();
+
+  // Short technical reports to the speech server's log (browser, microphone result, errors; never audio or words),
+  // so a problem on someone's iPhone can be seen from the server. Off with ?report=off.
+  const reportOff = /[?&]report=off/.test(location.search);
+  function report(what, data) {
+    if (reportOff) return;
+    const base = asrServer ? asrServer.replace(/^ws/, 'http').replace(/\/asr$/, '') : reportTo || (location.protocol === 'https:' || location.hostname === 'localhost' ? location.origin + location.pathname.replace(/[^/]*$/, '') : null);
+    if (!base) return;
+    try {
+      const body = JSON.stringify(Object.assign({ what, t: Math.round(performance.now()), ua: navigator.userAgent.slice(0, 160) }, data || {}));
+      const url = base.replace(/\/+$/, '') + '/report';
+      if (!(navigator.sendBeacon && navigator.sendBeacon(url, new Blob([body], { type: 'text/plain' })))) fetch(url, { method: 'POST', body, mode: 'cors', keepalive: true }).catch(() => {});
+    } catch (e) { /* best effort */ }
+  }
+  window.addEventListener('error', e => report('error', { msg: String(e.message).slice(0, 200), at: (e.filename || '').split('/').pop() + ':' + e.lineno }));
+  window.addEventListener('unhandledrejection', e => report('error', { msg: String(e.reason && (e.reason.message || e.reason)).slice(0, 200) }));
+  asrServerReady.then(() => report('page', { server: asrServer, secure: window.isSecureContext, modelOk: MODEL_OK, ios: IS_IOS, kind: chooseKind(),
+    worklet: typeof AudioWorkletNode === 'function', ctx: !!(window.AudioContext || window.webkitAudioContext), from: location.host }));
 
   // ---- Sabaq's own speech recognition: the microphone is recorded here, cut into phrases where the
   // reciter pauses, and each phrase is transcribed by Tarteel's Quran Whisper model in a worker.
@@ -899,6 +920,7 @@
         renderStatus(); return;
       }
       this.retries = 0; this.remote = false; this.pendingFinal.clear();
+      report('server-lost', { server: asrServer });
       toast('Can\'t reach Sabaq\'s speech server. Using the slower model on this phone for now; Sabaq switches back when the server returns.', 7000);
       this.init(true); renderStatus();
       clearInterval(this.probeTimer);
@@ -962,11 +984,14 @@
       if (!a) { toast('Audio is not available in this browser.', 4000); return; }
       setMic('starting');
       await Promise.race([asrServerReady, new Promise(r => setTimeout(r, 4000))]);
+      // (no server when the page opened, e.g. it was restarting: look again now, and use it if it is back)
+      if (!asrServer) { await Promise.race([findServer(), new Promise(r => setTimeout(r, 5000))]); if (asrServer && this.worker && !this.remote) { try { this.worker.terminate(); } catch (e) { /* gone */ } this.worker = null; this.ready = false; } }
       this.init();
       try {
         this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
       } catch (err) {
         setMic('idle');
+        report('mic-failed', { name: err && err.name, msg: String(err && err.message).slice(0, 160) });
         toast(IS_IOS ? 'Microphone blocked. Allow it for this site: Settings › Safari › Microphone, then reload.'
           : 'Microphone access was blocked. Allow it in the browser and try again.', 7000);
         return;
@@ -977,6 +1002,7 @@
       this.stream.getAudioTracks().forEach(t => { t.onended = () => { if (this.on) { toast('The microphone stopped.', 4000); this.stop(); } }; });
       setMic('listening');
       this.meter();
+      setTimeout(() => report('mic', { capture: this.capture, rate: this.rate, ctx: this.ctx && this.ctx.state, frames: this.frames, level: +this.level.toFixed(4), remote: !!this.remote, ready: this.ready, server: asrServer }), 4000);
     },
     // iPhone Safari pauses the microphone (and may close the connection) when the page goes to the background or
     // the screen locks. Going away: the phrase being heard is finished now (so it is judged, not glued to what
@@ -1037,6 +1063,7 @@
       if (!this.on) return;
       // audio is flowing (a silent room can be true digital silence with noise suppression on)
       if (this.frames > 0 && this.ctx.state === 'running') return;
+      report('mic-silent', { capture: this.capture, ctx: this.ctx && this.ctx.state, frames: this.frames, rebuilt: this.rebuilt });
       if (this.rebuilt) { toast('The microphone is not sending sound. Close other apps using it, then tap the mic again.', 6000); return; }
       this.rebuilt = true;
       this.noWorklet = true; // (the rebuild uses the older, proven capture path)

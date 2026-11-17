@@ -188,6 +188,16 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ ready: !!(read$.fast && read$.slow) && !closing, warm, queued: queue.length, models: NAMES, stream: LANES >= 2 ? 3 : 2,
       conns: wss.clients.size, maxConns: MAX_CONNS, busy, threads: THREADS, cores: CORES, uptime: Math.round((Date.now() - stats.started) / 1000),
       rssMB: Math.round(m.rss / 1048576), heapMB: Math.round(m.heapUsed / 1048576), jobs: stats.jobs, errors: stats.errors, refused: stats.refused, timings: summary() })); return; }
+  // a phone's short technical report (see report() in app.js): logged, nothing kept
+  if (name === 'report') {
+    const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type', 'access-control-allow-methods': 'POST' };
+    if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return; }
+    if (req.method !== 'POST') { res.writeHead(405, cors); res.end(); return; }
+    let body = '';
+    req.on('data', c => { if (body.length < 4000) body += c; });
+    req.on('end', () => { res.writeHead(204, cors); res.end(); let j = null; try { j = JSON.parse(body); } catch (e) { /* not ours */ } if (j && typeof j.what === 'string') log('phone ' + j.what.slice(0, 20) + ':', JSON.stringify(j).slice(0, 600)); });
+    return;
+  }
   if (!FILES.has(name)) { res.writeHead(404); res.end('not found'); return; }
   // (no cross-origin isolation headers: Safari would then refuse the in-browser fallback model's code)
   res.writeHead(200, { 'content-type': TYPES[path.extname(name)], 'cache-control': 'no-cache' });

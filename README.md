@@ -168,6 +168,34 @@ Fast recitation (2.2×, time-stretched Alafasy), runs without any false mark: at
 lag-test runs, and 0 of 2 lag runs + 0 of 1 session run just before the fix below; after it, 2 of 2 lag runs and
 3 of 6 runs of the harder `fast22` session (`ONLY=fast22 node tests/sessions.cjs`: shorter breaths). Small samples:
 2.2× is better, not solved. Normal speed: no false marks before or after.
+
+#### Keeping up with a fast reciter (hadr)
+
+Above 1.3 words/s (measured from the highlight's own steps over the last 4 s), Sabaq changes four things.
+
+- **Passes words sooner.** The word being said is passed as soon as the live reading has all its letters. It doesn't wait for the next word to be heard starting. An ayah's last word is the exception, because it is held long at any pace.
+- **Keeps moving past a suspected word.** The highlight carries on past a word that is being double-checked; the word keeps its "checking" underline. It no longer waits until the phrase ends and the check is done. A confirmed mistake still stops there.
+- **Doesn't stop on unclear audio.** If both readings miss a word but disagree about what was said there, the word is marked "not clearly heard" and nothing stops. A real slip sounds alike to both readings.
+- **Never gets stuck after a stop.** At any pace, if the reciter is still reciting 2 s after a stop, the next words are followed (the word stays marked). Before, the app waited for them to pause, up to 15 s.
+
+Two smaller changes:
+
+- While a phrase is being double-checked, the next phrase is previewed on top of it.
+- Audio goes to the server every 40 ms instead of every 80 ms.
+
+Measured (Al-Mulk 1–5, lag median / p90 / max, words followed):
+
+| Speed | Before | After |
+|---|---|---|
+| 1× | 0.4 / 0.8 / 1.7 s, 60/60 | unchanged by design (slower than 1.3 words/s) |
+| 2× (1.6 words/s) | 0.4 / 0.8 / 1.4 s, 60/60 | 0.3 / 0.7–0.8 / 0.9–1.2 s, 60/60 (3 runs) |
+| 2.5× (2 words/s) | stuck after a false stop: 48/60, rest lost | 0.5–0.6 / 2.4–2.9 / 3.3–5.0 s, 60/60 (2 runs) |
+| 3× | 24/60 | 54–58/60 (the stretched audio is garbled for both models) |
+
+`fast22` session: 2 of 2 runs clean (was 3 of 6), so the sample is small. At 2.5× one false stop is still common near 67:4–5; it now costs a few seconds instead of the rest of the recitation. Real fast recitation
+sounds cleaner than time-stretched audio, but this was not tested with a real fast reciter. The phone now reports its
+timings to the server log every 30 s (`phone timing:`), along with each stop (`phone stop:`) and each word let through as unclear
+(`phone unclear:`), so a real session can be checked.
 Disconnect test (server killed 14 s in): reconnected by itself, 60/60 words followed, no false marks.
 
 ### How a suspected mistake is checked

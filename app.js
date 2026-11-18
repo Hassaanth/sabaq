@@ -109,12 +109,32 @@
     while (view.qi + k < view.q.length && view.c + k < M.N && M.matchPair(view.q, view.qi + k, view.c + k).s >= 0.84) k++;
     return k;
   }
+  // How fast the reciter is going: words the highlight moved on in the last 4 s
+  const steps = [], stepAt = { c: -1 };
+  function wordsPerSec() { const now = performance.now(); while (steps.length && now - steps[0] > 4000) steps.shift(); return steps.length / 4; }
+  window.__sabaqPace = wordsPerSec;
+  // Reciting fast (hadr), waiting for the next word to be heard starting puts the highlight a word behind the voice.
+  // There, the word being said is passed as soon as the live reading has it in full (all its letters, as the text
+  // has it), before the next word starts. At a slower pace a long madd can still be going on after the model has
+  // named the word, so the highlight waits for the next word as before. (Display only: nothing is judged from it.)
+  const FAST_WPS = 1.3;
+  function tailDone(c) {
+    const t = ModelMic.tailNow;
+    if (!t || c < 0 || c >= M.N || T.stopped >= 0 || Input.kind !== 'model' || !ModelMic.inSpeech || t.seg !== ModelMic.seg || performance.now() - t.at > 700) return false;
+    if (wordsPerSec() < FAST_WPS) return false;
+    if (c + 1 >= M.N || M.ayahStart[c + 1]) return false; // (an ayah's last word is held long at any pace)
+    const k = M.keys[c];
+    return t.w === k || (t.w.length >= k.length && E.sim(t.w, k) >= 0.9);
+  }
   function shownCursor(view) {
     let c = view.c + heldAhead(view);
+    if (tailDone(c)) c++;
     const now = performance.now();
     if (c < hold.c && now < hold.until && T.c >= hold.tc && T.c <= hold.c && T.stopped < 0 && view.c >= 0) c = hold.c;
     else if (c !== hold.c) hold.until = now + 1200;
     hold.c = c; hold.tc = T.c;
+    if (stepAt.c >= 0 && c > stepAt.c && c - stepAt.c <= 3) for (let i = stepAt.c; i < c; i++) steps.push(now);
+    stepAt.c = c;
     return c;
   }
 
@@ -411,6 +431,11 @@
       clearTimeout(this.timer);
       if (T.stopped !== this.pos || !T.strict) { this.until = 0; render(false); return; } // fixed, or moved on
       const busy = attemptInFlight();
+      // Still reciting 2 s after the stop sounded: they may have carried on (a fast reciter who knows the word was
+      // right, or a misheard word). If the words now heard are the ones after the stopped word, they are followed
+      // (it stays marked for review), instead of waiting for them to pause for the qari. A try at the word itself
+      // is still judged first; if they pause instead, the qari recites the word as before.
+      if (busy && ModelMic.inSpeech && Date.now() - this.started > 2000) T.letContinue = true;
       if (Date.now() >= this.until && (!busy || Date.now() > this.until + 15000)) { this.until = 0; this.qari(); return; }
       this.timer = setTimeout(() => this.tick(), 150);
       renderStatus();
@@ -451,6 +476,7 @@
         soundStop();
         if (canVibrate()) { try { navigator.vibrate([70, 50, 70]); } catch (err) { /* not allowed */ } }
         Coach.stop(e.pos, e.state);
+        report('stop', { word: M.disp[e.pos], at: where(e.pos), state: e.state, wps: +wordsPerSec().toFixed(2) });
       }
       else if (e.type === 'moveOn') {
         toast((e.continued ? 'Carrying on. ' : e.auto ? 'Moving on after 3 tries. ' : 'Moving on. ') + M.disp[e.pos] + ' is marked for review.', 3200);
@@ -487,12 +513,18 @@
   // The highlight sits on the word being said: the word after the last one heard in full. It moves on when the
   // next word is heard starting, never sooner: a word the model already names (it often names a word from its
   // first sound) may still be going on (a long madd), so the word being said (tail) only keeps the phrase open.
-  function preview(text, fromModel, tail) {
+  // before: words of an earlier phrase still being judged (a double-check takes 1-3 s). The preview follows them
+  // without stopping anywhere, so the highlight keeps moving with the reciter meanwhile; the judgement decides.
+  function preview(text, fromModel, tail, before) {
     if (E.tokenize(text).length || tail) clearTimeout(idleTimer); // only real new speech postpones the end-of-phrase check
     if (Qari.gatedAny() && !fromModel) { phraseSkip = Math.max(phraseSkip, E.tokenize(text).length); return; }
     const words = E.tokenize(text).slice(phraseSkip);
     if (!words.length) { P = null; render(); return; }  // (render coalesces: cheap)
     P = T.clone();
+    if (before) { P.strict = false; P.feed(E.tokenize(before)); }
+    // (reciting fast: the highlight carries on past a suspected word, which shows as being checked, instead of
+    // waiting on it until the phrase ends and the double-check is done; a confirmed mistake still stops there)
+    if (fromModel && wordsPerSec() >= FAST_WPS) P.strict = false;
     P.feed(words);
     // (not on the model's live guesses: they are often garbled mid-phrase; its final result decides)
     if (T.strict && !fromModel && P.events.some(e => e.type === 'stop')) {
@@ -1002,6 +1034,8 @@
       this.stream.getAudioTracks().forEach(t => { t.onended = () => { if (this.on) { toast('The microphone stopped.', 4000); this.stop(); } }; });
       setMic('listening');
       this.meter();
+      clearInterval(this.diagTimer);
+      this.diagTimer = setInterval(() => { if (!this.on) { clearInterval(this.diagTimer); return; } if (Diag.rows.length) report('timing', Object.assign(Diag.summary(), { wps: +wordsPerSec().toFixed(2), remote: !!this.remote })); }, 30000);
       setTimeout(() => report('mic', { capture: this.capture, rate: this.rate, ctx: this.ctx && this.ctx.state, frames: this.frames, level: +this.level.toFixed(4), remote: !!this.remote, ready: this.ready, server: asrServer }), 4000);
     },
     // iPhone Safari pauses the microphone (and may close the connection) when the page goes to the background or
@@ -1164,10 +1198,10 @@
       this.buf.push(f); this.len += f.length;
       if (voiced) this.voicedN++;
       this.silence = voiced ? 0 : this.silence + 20;
-      // streaming to the server: every 80 ms of audio (the server reads it whenever its model is free)
+      // streaming to the server: every 40 ms of audio (the server reads it whenever its model is free)
       if (this.streamSeg === this.seg && this.streaming()) {
         this.unsent.push(f); this.unsentLen += f.length;
-        if (this.unsentLen >= 1280 && this.silence < 650) {
+        if (this.unsentLen >= 640 && this.silence < 650) {
           const out = new Float32Array(this.unsentLen); let o = 0;
           for (const b of this.unsent) { out.set(b, o); o += b.length; }
           this.unsent = []; this.unsentLen = 0;
@@ -1233,6 +1267,7 @@
       const all = E.tokenize(text), words = whole ? all : all.slice(0, -1), tail = whole ? null : all[all.length - 1] || null;
       const A = this.agree.seg === seg ? this.agree : (this.agree = { seg, prev: [], done: 0, locked: [] });
       A.prev = words;
+      this.tailNow = tail ? { seg, w: tail, at: performance.now() } : null;
       // Readings of the same phrase don't always start alike (one may add or drop a garbled first word), so
       // where the locked-in words end is found by matching them, never by counting.
       const start0 = alignAfter(words, A.locked);
@@ -1269,7 +1304,11 @@
     peek(text, seg, whole, gap) {
       if (seg !== this.seg || !this.inSpeech) return;
       const all = E.tokenize(text), words = whole ? all : all.slice(0, -1);
-      if (all.length) preview(words.join(' '), true, whole ? null : all[all.length - 1]);
+      this.tailNow = !whole && all.length ? { seg, w: all[all.length - 1], at: performance.now() } : null;
+      // (the phrase before this one is still being judged, or its final reading is on its way: its words so far)
+      const A = this.agree;
+      const before = this.judging != null && this.judgingText ? this.judgingText : A.seg < seg && A.prev.length ? this.unlocked(A.prev.join(' '), A.seg) : null;
+      if (all.length) preview(words.join(' '), true, whole ? null : all[all.length - 1], before);
     },
     // the words of a final reading that were not already locked in from live readings
     unlocked(text, seg, wide) {
@@ -1310,7 +1349,7 @@
       this.judging = seg;
       this.snapCur = null;
       if (T.stopped >= 0) this.snaps = [];
-      try { await this.judgeNow(text, seg); } finally { this.judging = null; if (this.snapCur) { (this.snaps = this.snaps || []).push(this.snapCur); if (this.snaps.length > 3) this.snaps.shift(); } if (this.suspectAt >= 0) { this.suspectAt = -1; render(false); } }
+      try { await this.judgeNow(text, seg); } finally { this.judging = null; this.judgingText = null; if (this.snapCur) { (this.snaps = this.snaps || []).push(this.snapCur); if (this.snaps.length > 3) this.snaps.shift(); } if (this.suspectAt >= 0) { this.suspectAt = -1; render(false); } }
     },
     async judgeNow(text, seg) {
       this.judgedSeg = Math.max(this.judgedSeg, seg);
@@ -1319,6 +1358,7 @@
       if (midCut) text = E.tokenize(text).slice(0, -1).join(' ');
       const full = E.tokenize(text);
       text = this.unlocked(text, seg);
+      this.judgingText = text;
       // (what the tracker was before this phrase's judged words, to go back to if the next phrase needs it)
       this.snapCur = { seg, T: T.clone(), text, locked: this.agree.seg === seg ? this.agree.locked.slice() : [] };
       // (nothing new: still arm the end-of-phrase check, which judges a slip on the ayah's last word)
@@ -1418,7 +1458,27 @@
       // (each reading tends to garble a different word) is not one.
       const merged = altRest.trim() ? consensus(E.tokenize(text), E.tokenize(altRest)).join(' ') : text;
       if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'consensus=[' + merged + ']' }); // dev-only
-      if (!stopsWith(merged)) { commit(merged, true, true); return; }
+      const stM = stopsWith(merged);
+      if (!stM) { commit(merged, true, true); return; }
+      // Reciting fast, both readings can miss a word yet disagree about what was said there (one hears nothing, the
+      // other another word; or two unrelated words): that word's audio is unclear, not a slip. A real slip sounds the
+      // same to both: a skipped word is missing from both, a wrong word is heard alike. Then no stop: the word is
+      // marked "not clearly heard" (not counted as a mistake) and the reciter is followed on.
+      if (wordsPerSec() >= FAST_WPS && altRest.trim()) {
+        const at = t => { const C = T.clone(); C.feed(E.tokenize(t)); C.flush(); const st = C.events.find(e => e.type === 'stop');
+          return !st || st.pos > stM.pos ? 'ok' : st.pos < stM.pos ? null : C.heard.has(stM.pos) ? C.heard.get(stM.pos).replace(/ /g, '') : ''; };
+        const h1 = at(text), h2 = at(altRest);
+        const alike = (h1 === '' && h2 === '') || (h1 && h2 && h1 !== 'ok' && h2 !== 'ok' && E.sim(h1, h2) >= 0.6);
+        if (h1 != null && h2 != null && !alike) {
+          if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'fast, readings disagree at ' + M.disp[stM.pos] + ' [' + h1 + '] [' + h2 + ']: not clearly heard, no stop' }); // dev-only
+          report('unclear', { word: M.disp[stM.pos], at: where(stM.pos), h1, h2, wps: +wordsPerSec().toFixed(2) });
+          const strict = T.strict; T.strict = false;
+          try { commit(merged, true, true); T.flush(); } finally { T.strict = strict; }
+          if (T.state[stM.pos] !== CORRECT) T._mark(stM.pos, UNCLEAR);
+          handleEvents(); render();
+          return;
+        }
+      }
       // both readings show the mistake: stop now (the reciter has paused; no need to wait for more words)
       commit(merged, true, true);
       if (!P) { clearTimeout(idleTimer); T.flush(); handleEvents(); render(); }
@@ -1473,7 +1533,7 @@
     const box = document.createElement('div');
     box.style.cssText = 'position:fixed;left:8px;bottom:calc(8px + env(safe-area-inset-bottom,0px));z-index:99;font:11px/1.35 ui-monospace,monospace;background:var(--paper,#fff);color:var(--ink,#000);opacity:.88;padding:4px 6px;border-radius:6px;pointer-events:none;white-space:pre';
     document.body.append(box);
-    setInterval(() => { const s = Diag.summary(); box.textContent = 'live readings ' + s.n + ' (median/p90 ms)\nround trip ' + s.e2e + '  model ' + s.ms + '\nserver wait ' + s.wait + '  net ' + s.net + '\nalign ' + s.align + '  drawn ' + s.paint + '\nmic ' + (ModelMic.capture || '-') + ' ' + (ModelMic.rate || '-') + ' Hz' + (ModelMic.remote ? ' · server' : ' · on phone'); }, 1000);
+    setInterval(() => { const s = Diag.summary(); box.textContent = 'live readings ' + s.n + ' (median/p90 ms)\nround trip ' + s.e2e + '  model ' + s.ms + '\nserver wait ' + s.wait + '  net ' + s.net + '\nalign ' + s.align + '  drawn ' + s.paint + '\npace ' + wordsPerSec().toFixed(1) + ' words/s' + (wordsPerSec() >= FAST_WPS ? ' (fast)' : '') + '\nmic ' + (ModelMic.capture || '-') + ' ' + (ModelMic.rate || '-') + ' Hz' + (ModelMic.remote ? ' · server' : ' · on phone'); }, 1000);
   }
 
   // Inside claude.ai, phones (and browsers without Claude dictation) can't use the microphone: say where it works.

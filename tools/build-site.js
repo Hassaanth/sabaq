@@ -4,7 +4,9 @@
 // the app plays the qari's word recordings straight from Quran.com, for every word of the Quran.
 const fs = require('fs'), path = require('path');
 const ROOT = path.join(__dirname, '..');
-const page = fs.readFileSync(path.join(ROOT, 'app.html'), 'utf8').replace(/<script src="audio\/index\.js"><\/script>\s*/, '');
+const page = fs.readFileSync(path.join(ROOT, 'app.html'), 'utf8').replace(/<script src="audio\/index\.js"><\/script>\s*/, '')
+  // (each script carries a hash of its contents: a phone never runs a new page with an old cached script)
+  .replace(/<script src="(quran-data|engine|app)\.js">/g, (m, n) => '<script src="' + n + '.js?v=' + require('crypto').createHash('sha1').update(fs.readFileSync(path.join(ROOT, n + '.js'))).digest('hex').slice(0, 8) + '">');
 const head = [
   '<!doctype html>',
   '<html lang="en">',

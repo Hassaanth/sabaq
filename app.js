@@ -121,7 +121,8 @@
   function tailDone(c) {
     const t = ModelMic.tailNow;
     if (!t || c < 0 || c >= M.N || T.stopped >= 0 || Input.kind !== 'model' || !ModelMic.inSpeech || t.seg !== ModelMic.seg || performance.now() - t.at > 700) return false;
-    if (wordsPerSec() < FAST_WPS) return false;
+    // (at a slower pace, only once two live readings in a row have the word in full: not on its first sound)
+    if (wordsPerSec() < FAST_WPS && !(t.n >= 2)) return false;
     if (c + 1 >= M.N || M.ayahStart[c + 1]) return false; // (an ayah's last word is held long at any pace)
     const k = M.keys[c];
     return t.w === k || (t.w.length >= k.length && E.sim(t.w, k) >= 0.9);
@@ -436,7 +437,9 @@
       // (it stays marked for review), instead of waiting for them to pause for the qari. A try at the word itself
       // is still judged first; if they pause instead, the qari recites the word as before.
       if (busy && ModelMic.inSpeech && Date.now() - this.started > 2000) T.letContinue = true;
-      if (Date.now() >= this.until && (!busy || Date.now() > this.until + 15000)) { this.until = 0; this.qari(); return; }
+      // (never while the reciter is speaking: what the mic hears while the qari plays is thrown away, so the qari
+      // would erase their correction; 15 s is only a limit for a reading that never comes back)
+      if (Date.now() >= this.until && (!busy || (Date.now() > this.until + 15000 && !(ModelMic.on && ModelMic.inSpeech)))) { this.until = 0; this.qari(); return; }
       this.timer = setTimeout(() => this.tick(), 150);
       renderStatus();
     },
@@ -540,7 +543,7 @@
   // follow. Where neither fits, the first reading's word stays (a mistake both heard).
   function consensus(a, b) {
     const n = a.length, m = b.length, D = [];
-    for (let i = 0; i <= n; i++) { D.push(new Float32Array(m + 1)); D[i][0] = i; }
+    for (let i = 0; i <= n; i++) { D.push(new Float64Array(m + 1)); D[i][0] = i; }
     for (let j = 0; j <= m; j++) D[0][j] = j;
     for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) {
       const sub = a[i - 1] === b[j - 1] ? 0 : E.sim(a[i - 1], b[j - 1]) >= 0.5 ? 0.6 : 1.2;
@@ -549,7 +552,7 @@
     const cols = [];
     for (let i = n, j = m; i > 0 || j > 0;) {
       if (i > 0 && j > 0 && D[i][j] === D[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : E.sim(a[i - 1], b[j - 1]) >= 0.5 ? 0.6 : 1.2)) { cols.push([a[i - 1], b[j - 1]]); i--; j--; }
-      else if (i > 0 && D[i][j] === D[i - 1][j] + 1) { cols.push([a[i - 1], null]); i--; }
+      else if (i > 0 && (j === 0 || D[i][j] === D[i - 1][j] + 1)) { cols.push([a[i - 1], null]); i--; }
       else { cols.push([null, b[j - 1]]); j--; }
     }
     cols.reverse();
@@ -588,12 +591,17 @@
     const C = T.clone();
     C.feed(words);
     // (an extra word the tracker set aside, or a repeat, is not simply right either: the final reading decides)
+    // (stopped, going back to correct is what the reciter was asked to do: those words lock in as they come)
+    if (T.stopped >= 0 && C.events.some(e => e.type === 'restart') && !C.events.some(e => e.type === 'stop' || e.type === 'mistake' || e.type === 'relocated') && C.stats.extras === T.stats.extras && C.lost.length <= T.lost.length)
+      return Math.max(0, words.length - (C.q.length - C.qi));
     if (C.events.some(e => e.type === 'stop' || e.type === 'mistake' || e.type === 'relocated' || e.type === 'restart')) return 0;
     if (C.stats.extras > T.stats.extras) return 0;
     // (a word the tracker could not place, kept aside in case the reciter moved elsewhere, is not right either)
     if (C.lost.length > T.lost.length || (T.c >= 0 && C.c < T.c)) return 0;
     const a = T.state, b = C.state;
-    for (let p = 0; p < b.length; p++) if (b[p] !== a[p] && b[p] !== CORRECT) return 0;
+    // (carrying on after a stop marks the words between "not clearly heard": that is fine to lock in)
+    const carried = C.events.some(e => e.type === 'moveOn' && e.continued);
+    for (let p = 0; p < b.length; p++) if (b[p] !== a[p] && b[p] !== CORRECT && !(carried && b[p] === UNCLEAR)) return 0;
     // locked words must have moved the cursor on by as many words
     const ok = Math.max(0, words.length - (C.q.length - C.qi));
     return T.c >= 0 && C.c - T.c < ok ? Math.max(0, C.c - T.c) : ok;
@@ -1216,7 +1224,7 @@
       // pause (never inside a fading word ending), and at 25 s regardless.
       // (an early cut waits for the next short gap between words: cutting inside a word garbles it, and both
       // readings would then hear the same garble; after 1.5 s it cuts anyway and the word at the cut is not judged)
-      const cutGap = this.cutNow && this.silence >= 80, cutLate = this.cutNow && performance.now() - this.cutAt > 1500;
+      const cutGap = this.cutNow && this.silence >= 160, cutLate = false;
       if (cutGap || cutLate || (this.len >= 16000 * this.chunkSecs() && this.silence >= (this.streaming() ? 300 : 160)) || (this.len >= 16000 * 14 && this.silence >= 100) || this.len >= 16000 * 25) {
         if (cutLate && !cutGap) this.cutMid.add(this.seg);
         this.cutNow = false;
@@ -1267,7 +1275,7 @@
       const all = E.tokenize(text), words = whole ? all : all.slice(0, -1), tail = whole ? null : all[all.length - 1] || null;
       const A = this.agree.seg === seg ? this.agree : (this.agree = { seg, prev: [], done: 0, locked: [] });
       A.prev = words;
-      this.tailNow = tail ? { seg, w: tail, at: performance.now() } : null;
+      this.tailNow = tail ? { seg, w: tail, at: performance.now(), n: this.tailNow && this.tailNow.seg === seg && this.tailNow.w === tail ? this.tailNow.n + 1 : 1 } : null;
       // Readings of the same phrase don't always start alike (one may add or drop a garbled first word), so
       // where the locked-in words end is found by matching them, never by counting.
       const start0 = alignAfter(words, A.locked);
@@ -1304,7 +1312,7 @@
     peek(text, seg, whole, gap) {
       if (seg !== this.seg || !this.inSpeech) return;
       const all = E.tokenize(text), words = whole ? all : all.slice(0, -1);
-      this.tailNow = !whole && all.length ? { seg, w: all[all.length - 1], at: performance.now() } : null;
+      this.tailNow = !whole && all.length ? { seg, w: all[all.length - 1], at: performance.now(), n: this.tailNow && this.tailNow.seg === seg && this.tailNow.w === all[all.length - 1] ? this.tailNow.n + 1 : 1 } : null;
       // (the phrase before this one is still being judged, or its final reading is on its way: its words so far)
       const A = this.agree;
       const before = this.judging != null && this.judgingText ? this.judgingText : A.seg < seg && A.prev.length ? this.unlocked(A.prev.join(' '), A.seg) : null;
@@ -1403,7 +1411,7 @@
       // in between may have been only a breath or a cough)
       const snaps = this.snaps || [];
       let k = snaps.length - 1;
-      while (k >= 0 && !(snaps[k].T.c < st1.pos || (k === 0 && snaps[k].T.c === st1.pos))) k--;
+      while (k >= 0 && !(snaps[k].T.c <= st1.pos)) k--;
       const S = k >= 0 ? snaps[k] : null;
       let span = null;
       if (S && S.T.c > 0 && T.stopped < 0) {
@@ -1449,6 +1457,8 @@
       // mending it word by word would keep its garbage. No stop: a stop needs both readings to hear the mistake.
       const altN = E.tokenize(altRest).length;
       const fitsAll = t => { const C = T.clone(); const n0 = C.events.length; C.feed(E.tokenize(t)); C.flush(); return !C.events.slice(n0).some(e => /^(stop|mistake|relocated)$/.test(e.type)) && C.stats.extras === T.stats.extras && C.lost.length <= T.lost.length; };
+      { const w = E.tokenize(altRest);
+        if (w.length > 2 && T.c >= 0 && !fitsAll(altRest) && !(E.sim(w[0], M.keys[T.c]) >= 0.5) && fitsAll(w.slice(1).join(' '))) altRest = w.slice(1).join(' '); }
       if (altN && altN >= E.tokenize(text).length - 1 && fitsAll(altRest)) {
         if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'second reading clean: [' + altRest + ']' }); // dev-only
         commit(altRest, true, true); return;
@@ -1460,17 +1470,22 @@
       if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'consensus=[' + merged + ']' }); // dev-only
       const stM = stopsWith(merged);
       if (!stM) { commit(merged, true, true); return; }
-      // Reciting fast, both readings can miss a word yet disagree about what was said there (one hears nothing, the
-      // other another word; or two unrelated words): that word's audio is unclear, not a slip. A real slip sounds the
-      // same to both: a skipped word is missing from both, a wrong word is heard alike. Then no stop: the word is
-      // marked "not clearly heard" (not counted as a mistake) and the reciter is followed on.
-      if (wordsPerSec() >= FAST_WPS && altRest.trim()) {
+      // Both readings can miss a word yet disagree about what was said there (one hears nothing, the other another
+      // word; or two unrelated words): that word's audio is unclear, not a slip. A real slip sounds the same to both:
+      // a skipped word is missing from both, a wrong word is heard alike. Then no stop: the word is marked "not
+      // clearly heard" (not counted as a mistake) and the reciter is followed on. (A phone mic, a reciter's own
+      // voice and joined words (idgham, a dropped hamzat al-wasl) garble words at any pace, not only when fast.)
+      if (altRest.trim()) {
         const at = t => { const C = T.clone(); C.feed(E.tokenize(t)); C.flush(); const st = C.events.find(e => e.type === 'stop');
           return !st || st.pos > stM.pos ? 'ok' : st.pos < stM.pos ? null : C.heard.has(stM.pos) ? C.heard.get(stM.pos).replace(/ /g, '') : ''; };
         const h1 = at(text), h2 = at(altRest);
         const alike = (h1 === '' && h2 === '') || (h1 && h2 && h1 !== 'ok' && h2 !== 'ok' && E.sim(h1, h2) >= 0.6);
+        // (one reading clearly heard a different word of the Quran there, e.g. أمره for يخلق; the other ran it into the
+        // word before: that is a slip, not unclear audio)
+        const realWord = h => !!h && h !== 'ok' && h.length >= 3 && M.keySet.has(h) && E.sim(h, M.keys[stM.pos]) < 0.5;
+        if (realWord(h1) || realWord(h2)) { /* a real other word: stop as before */ } else
         if (h1 != null && h2 != null && !alike) {
-          if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'fast, readings disagree at ' + M.disp[stM.pos] + ' [' + h1 + '] [' + h2 + ']: not clearly heard, no stop' }); // dev-only
+          if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'readings disagree at ' + M.disp[stM.pos] + ' [' + h1 + '] [' + h2 + ']: not clearly heard, no stop' }); // dev-only
           report('unclear', { word: M.disp[stM.pos], at: where(stM.pos), h1, h2, wps: +wordsPerSec().toFixed(2) });
           const strict = T.strict; T.strict = false;
           try { commit(merged, true, true); T.flush(); } finally { T.strict = strict; }

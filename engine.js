@@ -63,8 +63,20 @@
     }
     return prev[lb];
   }
-  // Differences only in long-vowel letters (ا و ي) are spelling variants (داود / داوود), not recitation.
-  const spellingOnly = (a, b) => { const v = x => x.replace(/[اوي]/g, ''); return v(a).length >= 2 && v(a) === v(b); };
+  // Differences only in long-vowel letters (ا و ي) are spelling variants (داود / داوود), not recitation. So are
+  // the ways words sound when joined (wasl), as a recogniser may write them:
+  //   ta marbuta read on is "t" (مرة -> "مرت"); the lam of al- before a sun letter is not said (الشمس -> "اشمس");
+  //   a dropped hamzat al-wasl (الخلاق -> "لخلاق", already only an alif); a final nun merged into the next word
+  //   (idgham: من يقول -> "مي يقول").
+  const collapse = x => x.replace(/(.)\1+/g, '$1');
+  const vow = x => collapse(x.replace(/^([وفبك]?)ال(?=[تثدذرزسشصضطظلن])/, '$1ا').replace(/[ته]$/, 'ه').replace(/ا/g, ''));
+  const spellingOnly = (a, b) => {
+    const va = vow(a), vb = vow(b);
+    if (va.length >= 2 && va === vb) return true;
+    if (a.length >= 3 && collapse(a) === collapse(b)) return true; // شييا / شيا
+    if (b.length >= 2 && b.endsWith('ن') && va.length >= 1 && va === vow(b.slice(0, -1))) return true;
+    return false;
+  };
   const simCache = new Map();
   function sim(a, b) {
     if (a === b) return 1;
@@ -76,6 +88,8 @@
     // Alif spelling differences (ذلك / ذالك, الرحمن / الرحمان) are spelling, not recitation.
     const sa = skel(a), sb = skel(b);
     if (sa.length >= 2 && sa === sb) v = Math.max(v, 0.92);
+    // Ta marbuta read on (wasl) is said "t": مرة -> "مرت", نعمة -> "نعمت". Same word.
+    if (a.length === b.length && a.length >= 3 && a.slice(0, -1) === b.slice(0, -1)) { const x = a[a.length - 1] + b[b.length - 1]; if (x === 'هت' || x === 'ته') v = Math.max(v, 0.92); }
     if (simCache.size > 200000) simCache.clear();
     simCache.set(ck, v);
     return v;
@@ -168,6 +182,15 @@
       if (best.s < STRONG && p + 1 < this.N) {
         const s = sim(r, k + this.keys[p + 1]);
         if (s >= STRONG && s > best.s + 0.05) best = { s, nr: 1, nt: 2 };
+      }
+      if ((best.s < STRONG || (best.nt === 2 && best.s < 1)) && p + 1 < this.N && r.length >= 4) {
+        const k2 = this.keys[p + 1], firsts = [k], seconds = [k2];
+        if (/^[اي]$/.test(k[k.length - 1]) && k.length >= 3) firsts.push(k.slice(0, -1));
+        if (k.endsWith('ن') && k.length >= 2) firsts.push(k.slice(0, -1));
+        if (k2.startsWith('ال')) { seconds.push(k2.slice(1)); if ('تثدذرزسشصضطظلن'.includes(k2[2])) seconds.push(k2.slice(2)); }
+        else if (k2.startsWith('ا') && k2.length >= 4) seconds.push(k2.slice(1));
+        const cr = collapse(r);
+        for (const f of firsts) for (const g of seconds) if (cr === collapse(f + g)) { best = { s: 0.95, nr: 1, nt: 2, blend: true }; break; }
       }
       // Two words recited joined (wasl) are often written by the recogniser as one word with the join
       // blurred: هل أتاك -> "الأتاك". The second word is there in full; the first is only "not clearly heard".
@@ -287,7 +310,7 @@
       t.c = this.c; t.q = this.q.slice(); t.qi = this.qi; t.lost = this.lost.slice();
       t.events = []; t.stats = Object.assign({}, this.stats); t.sawBismillah = this.sawBismillah;
       t.strict = this.strict; t.stopped = this.stopped; t.fixed = new Set(this.fixed); t.flagged = new Set(this.flagged);
-      t.heardCount = this.heardCount; t.stopHeard = this.stopHeard; t.stopWord = this.stopWord; t.attempts = this.attempts; t.noRewindBefore = this.noRewindBefore; t.letContinue = this.letContinue; t.hint = this.hint;
+      t.heardCount = this.heardCount; t.stopHeard = this.stopHeard; t.stopWord = this.stopWord; t.attempts = this.attempts; t.noRewindBefore = this.noRewindBefore; t.letContinue = this.letContinue; t.hint = this.hint; t.stopQ = this.stopQ;
       return t;
     }
     setPosition(p) { this.c = p; this.lost = []; this.q = this.q.slice(this.qi); this.qi = 0; this.stopped = -1; this.noRewindBefore = 0; }
@@ -420,8 +443,16 @@
             const k = this._conf(r + j + mm.nr, p + mm.nt);
             if (k >= 2) {
               this.stopped = -1; this.attempts = 0; this.letContinue = false;
-              // words recited while stopped were not followed: "not clearly heard", never "skipped"
-              for (let x = c + 1; x < p; x++) if (this.state[x] === PENDING) this._mark(x, UNCLEAR);
+              // Words recited while stopped were not followed. Those that were heard (said after the stop, in order)
+              // are simply right; the rest are "not clearly heard", never "skipped".
+              const said = this.q.slice(Math.min(this.stopQ != null ? this.stopQ : r + j, r + j), r + j);
+              let si = 0;
+              for (let x = c + 1; x < p; x++) {
+                if (this.state[x] !== PENDING) continue;
+                let hit = -1;
+                for (let i = si; i < said.length; i++) if (sim(said[i], m.keys[x]) >= STRONG) { hit = i; break; }
+                if (hit >= 0) { this._mark(x, CORRECT); si = hit + 1; } else this._mark(x, UNCLEAR);
+              }
               // carrying on from the very next word right after the qari: the word itself was most likely said and
               // clipped by the recogniser (a reply's first word often is): "not clearly heard", not "missed"
               if (p === c + 1 && j === 0 && this.state[c] === MISSED) this._mark(c, UNCLEAR);
@@ -572,7 +603,7 @@
         const x = c + j;
         if (pairOf[j] >= 0) {
           const h = heard[pairOf[j]], sv = sim(h, T[j]);
-          this._mark(x, sv >= STRONG ? CORRECT : sv >= NEAR ? CLOSE : WRONG, h);
+          this._mark(x, sv >= STRONG || (sv >= NEAR && spellingOnly(h, T[j])) ? CORRECT : sv >= NEAR ? CLOSE : WRONG, h);
         } else if (this.state[x] === PENDING) this._mark(x, soft[j] && !this.strict ? UNCLEAR : MISSED);
         if (this.strict && (this.state[x] === WRONG || this.state[x] === MISSED || this.state[x] === CLOSE)) {
           this._gapAttempt = pairOf[j] >= 0; // something was said for this word (vs. skipped)
@@ -592,7 +623,7 @@
        they are let through (the word stays marked for review). */
     _stop(p, attempt) {
       const again = this.stopped === p;
-      if (!again) { this.attempts = 0; this.letContinue = false; this.stopWord = this.heard.has(p) ? this.heard.get(p).replace(/ /g, '') : null; }
+      if (!again) { this.attempts = 0; this.letContinue = false; this.stopWord = this.heard.has(p) ? this.heard.get(p).replace(/ /g, '') : null; this.stopQ = this.qi; }
       if (attempt) this.attempts++;
       if (again && attempt && this.attempts >= 3) {
         this.stopped = -1; this.c = p + 1; this.lost.length = 0;
@@ -643,6 +674,12 @@
         this._stop(this.c, false);
         return true;
       }
+      if (wasLocked && this.strict && this.stopped < 0 && this.m.sOf[target] !== this.m.sOf[this.c] && this.c - this.m.ayahPos[this.m.sOf[this.c]][this.m.aOf[this.c] - 1] >= 2 && !(this.c + 1 < this.m.N && this.m.ayahStart[this.c + 1])) {
+        this._mark(this.c, WRONG, this.q[this.lost[0]]);
+        this.lost.length = 0;
+        this._stop(this.c, true);
+        return true;
+      }
       if (this.stopped >= 0) {
         // relocating while stopped (the reciter carried on elsewhere): the stop is over; the word stays marked
         this.events.push({ type: 'moveOn', pos: this.stopped, auto: true, continued: true });
@@ -687,6 +724,7 @@
       this.qi -= drop;
       this.lost = this.lost.map(i => i - drop).filter(i => i >= 0);
       this.noRewindBefore = Math.max(0, this.noRewindBefore - drop);
+      if (this.stopQ != null) this.stopQ = Math.max(0, this.stopQ - drop);
     }
   }
   function anchor0(res) {

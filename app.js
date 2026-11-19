@@ -123,6 +123,9 @@
     if (!t || c < 0 || c >= M.N || T.stopped >= 0 || Input.kind !== 'model' || !ModelMic.inSpeech || t.seg !== ModelMic.seg || performance.now() - t.at > 700) return false;
     // (at a slower pace, only once two live readings in a row have the word in full: not on its first sound)
     if (wordsPerSec() < FAST_WPS && !(t.n >= 2)) return false;
+    // (and not on a word ending in a long vowel (madd) or marked with a madd sign: a madd is held after the model has
+    // already written the whole word; at a fast pace madds are short)
+    if (wordsPerSec() < FAST_WPS && (/[اويه]/.test(M.keys[c].slice(-2).replace(/ه$/, "")) || /[اوي]/.test(M.keys[c].slice(-2)) || /ٓ/.test(M.disp[c]))) return false;
     if (c + 1 >= M.N || M.ayahStart[c + 1]) return false; // (an ayah's last word is held long at any pace)
     const k = M.keys[c];
     return t.w === k || (t.w.length >= k.length && E.sim(t.w, k) >= 0.9);

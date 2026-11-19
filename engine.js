@@ -484,7 +484,12 @@
         let cost = 0;
         if (back) cost = 0.01 + (c - p) * 0.005;
         else for (let x = c; x < p; x++) cost += m.keys[x].length <= 3 ? 0.04 : 0.15;
-        H.push({ t: back ? 'back' : 'fwd', p, mm, k: this._conf(r + mm.nr, p + mm.nt), base: mm.s - cost });
+        const kk = this._conf(r + mm.nr, p + mm.nt);
+        // Teacher mode: going back far, to the middle of an ayah, on a word or two that happen to match (a similar
+        // phrase two ayahs back: "من يحيي العظام" for a slip "أن يحيي الموتى") is not a restart unless 3 words in a
+        // row confirm it. Going back to an ayah's start, or a few words, is as easy as before.
+        if (back && this.strict && c - p > 8 && !m.ayahStart[p] && kk < 2) continue;
+        H.push({ t: back ? 'back' : 'fwd', p, mm, k: kk, base: mm.s - cost });
       }
       for (const h of H) h.score = h.base + h.k;
       H.sort((a, b) => b.score - a.score);

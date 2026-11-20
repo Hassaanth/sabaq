@@ -20,11 +20,11 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import crypto from 'crypto';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import { pipeline, env } from '@huggingface/transformers';
+import { loadScorer } from './ctc-score.js';
 
 const require = createRequire(import.meta.url);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -55,27 +55,28 @@ const NOT_QURAN = new Set(['نهاية', 'الدرس']);
 const CORES = os.cpus().length;
 const THREADS = +process.env.THREADS || Math.max(1, Math.min(4, CORES >> 1 || 1));
 
-// ---- NVIDIA Arabic FastConformer (CTC), via sherpa-onnx; downloaded once, checked against its published hashes
-const CTC_DIR = path.join(env.cacheDir, 'fastconformer-ar-ctc');
-const CTC_URL = 'https://github.com/OmarrGhorab/openbot-personal/releases/download/models-fastconformer-ar-v1/';
-const CTC_FILES = {
-  'model.int8.onnx': 'ce25098a710db5bf44284530707559f7b4be9b12cfc550816b5f9cc869a3c121',
-  'tokens.txt': 'b5d39b52143723e71d997ed5dd8a68aa5facbd0a7c84a47669f83b0033d33164',
-};
-const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+// ---- NVIDIA Arabic FastConformer (CTC), via sherpa-onnx. The files live in server/models/pc (CTC_DIR to choose):
+// model.int8.onnx and tokens.txt, built by build-ctc-model.py from NVIDIA's own checkpoint (see the README). If
+// they are missing and CTC_URL is set (a folder holding both files), they are downloaded there once.
+const CTC_DIR = process.env.CTC_DIR || path.join(HERE, 'models', 'pc');
+const CTC_URL = process.env.CTC_URL || '';
+let scorer = null;
 async function loadCtc() {
   if (process.env.NO_CTC) return null;
   fs.mkdirSync(CTC_DIR, { recursive: true });
-  for (const [name, hash] of Object.entries(CTC_FILES)) {
+  for (const name of ['model.int8.onnx', 'tokens.txt']) {
     const file = path.join(CTC_DIR, name);
-    if (fs.existsSync(file) && sha256(file) === hash) continue;
+    if (fs.existsSync(file)) continue;
+    if (!CTC_URL) throw new Error(file + ' is missing (build it with build-ctc-model.py, or set CTC_URL)');
     console.log('downloading', name, '…');
-    const r = await fetch(CTC_URL + name);
+    const r = await fetch(CTC_URL.replace(/\/?$/, '/') + name);
     if (!r.ok) throw new Error('download ' + name + ': HTTP ' + r.status);
     fs.writeFileSync(file + '.part', Buffer.from(await r.arrayBuffer()));
-    if (sha256(file + '.part') !== hash) throw new Error(name + ': checksum mismatch');
     fs.renameSync(file + '.part', file);
   }
+  // (the same model, run directly, for how well given words fit the audio: see ctc-score.js)
+  try { scorer = await loadScorer(path.join(CTC_DIR, 'model.int8.onnx'), path.join(CTC_DIR, 'tokens.txt'), THREADS); await scorer.logprobs(new Float32Array(16000)); }
+  catch (e) { scorer = null; console.error('word check not available:', e.message); }
   const sherpa = require('sherpa-onnx-node');
   const rec = new sherpa.OfflineRecognizer({
     featConfig: { sampleRate: 16000, featureDim: 80 },
@@ -109,7 +110,7 @@ const loading = (async () => {
   let ctc = null;
   try { ctc = await loadCtc(); } catch (e) { console.error('FastConformer not available (' + e.message + '); using Whisper only.'); }
   const whisper = await loadWhisper(MODEL);
-  if (ctc) { read$.fast = ctc; read$.slow = whisper; LANES = 2; NAMES = { live: 'fastconformer-ctc', final: 'fastconformer-ctc', verify: 'whisper-base' }; }
+  if (ctc) { read$.fast = ctc; read$.slow = whisper; LANES = 2; NAMES = { live: 'fastconformer-ctc', final: 'fastconformer-ctc', verify: 'whisper-base' }; if (scorer) NAMES.score = 'fastconformer-ctc'; }
   else { read$.fast = await loadWhisper(FALLBACK_LIVE); read$.slow = whisper; LANES = 1; NAMES = { live: 'whisper-tiny', final: 'whisper-base', verify: 'whisper-base' }; }
   const t = Date.now(); await read$.fast(new Float32Array(16000)); warm = Date.now() - t;
   console.log(`models ready in ${((Date.now() - t0) / 1000).toFixed(1)} s: ${JSON.stringify(NAMES)}, ${THREADS} threads; a live reading costs ~${warm} ms`);
@@ -167,13 +168,17 @@ async function run(job, lane) {
   busy[lane] = true; lastServed[lane] = job.ws;
   const t = Date.now();
   let text = '', gap = null, error;
-  try { const r = await modelFor(job.kind)(job.audio); if (typeof r === 'string') text = r; else { text = r.text; gap = r.gap == null ? null : Math.max(0, r.gap - (job.pad || 0) / 16000); } } catch (e) { error = String((e && e.message) || e); }
+  let costs;
+  try {
+    if (job.kind === 'score') { if (!scorer) throw new Error('no word check'); const lp = await scorer.logprobs(job.audio); costs = job.windows.map(w => +scorer.cost(lp, w).toFixed(2)); }
+    else { const r = await modelFor(job.kind)(job.audio); if (typeof r === 'string') text = r; else { text = r.text; gap = r.gap == null ? null : Math.max(0, r.gap - (job.pad || 0) / 16000); } }
+  } catch (e) { error = String((e && e.message) || e); }
   busy[lane] = false;
   const ms = Date.now() - t, wait = job.rx ? t - job.rx : 0;
   stats.jobs++; if (error) { stats.errors++; log('reading failed (' + job.kind + '):', error); } note(job.kind, ms, wait);
   // timings: wait = from the newest audio arriving to the model starting on it; ms = the model's own time;
   // cap = the phone's clock stamp of that audio, sent back so the phone can measure the whole round trip
-  if (job.ws.readyState === 1) job.ws.send(JSON.stringify({ type: 'result', id: job.id, kind: job.kind, seg: job.seg, text, gap, whole: job.whole, len: job.audio.length - (job.pad || 0), error, ms, wait, cap: job.cap, secs: (job.audio.length - (job.pad || 0)) / 16000 }));
+  if (job.ws.readyState === 1) job.ws.send(JSON.stringify({ type: 'result', id: job.id, kind: job.kind, seg: job.seg, text, gap, costs, whole: job.whole, len: job.audio.length - (job.pad || 0), error, ms, wait, cap: job.cap, secs: (job.audio.length - (job.pad || 0)) / 16000 }));
   pump();
 }
 loading.then(pump);
@@ -228,7 +233,7 @@ wss.on('connection', (ws, req) => {
   log('reciter connected (' + wss.clients.size + ' open)' + (req && req.headers.origin ? ' from ' + req.headers.origin : ''));
   const segs = new Map(); // seg -> { parts: Float32Array[], len }
   ws.segs = segs; ws.live = null;
-  const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true, lanes: LANES, models: NAMES, stream: LANES >= 2 ? 3 : 2 }));
+  const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true, lanes: LANES, models: NAMES, stream: LANES >= 2 ? 3 : 2, score: scorer ? 1 : 0 }));
   if (read$.fast && read$.slow) hello(); else loading.then(hello);
   ws.on('message', (data, isBinary) => { try { onMessage(data, isBinary); } catch (e) { console.error('bad message:', e && e.message); } });
   const onMessage = (data, isBinary) => {
@@ -254,6 +259,11 @@ wss.on('connection', (ws, req) => {
     let audio;
     // the phrase's reading: it is no longer streamed
     if (head.kind === 'final' && ws.live && ws.live.seg <= head.seg) ws.live = null;
+    // (a word check: up to 8 runs of up to 8 words, on audio sent with it)
+    if (head.kind === 'score') {
+      const ok = Array.isArray(head.windows) && head.windows.length && head.windows.length <= 8 && head.windows.every(w => Array.isArray(w) && w.length && w.length <= 8 && w.every(x => typeof x === 'string' && x.length <= 40));
+      if (!ok || !scorer || head.t !== 'full') { ws.send(JSON.stringify({ type: 'result', id: head.id, kind: 'score', seg: head.seg, error: 'no word check' })); return; }
+    }
     if (head.t === 'full') audio = toFloat(pcm);
     else {
       const s = segs.get(head.seg); if (!s) return;
@@ -277,7 +287,7 @@ wss.on('connection', (ws, req) => {
     if (head.kind !== 'partial' && queue.filter(j => j.ws === ws && j.kind !== 'partial').length >= MAX_JOBS) {
       stats.dropped++; ws.send(JSON.stringify({ type: 'result', id: head.id, kind: head.kind, seg: head.seg, text: '', error: 'busy' })); return;
     }
-    queue.push({ ws, id: head.id, kind: head.kind, seg: head.seg, whole: head.whole, pad: head.pad || 0, audio, rx: Date.now(), cap: head.cap });
+    queue.push({ ws, id: head.id, kind: head.kind, seg: head.seg, whole: head.whole, pad: head.pad || 0, audio, rx: Date.now(), cap: head.cap, windows: head.windows });
     pump();
   };
   ws.on('close', () => { log('reciter left (' + wss.clients.size + ' open)'); segs.clear(); lives.delete(ws); for (let i = queue.length - 1; i >= 0; i--) if (queue[i].ws === ws) queue.splice(i, 1); });

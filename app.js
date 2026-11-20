@@ -117,6 +117,9 @@
   // There, the word being said is passed as soon as the live reading has it in full (all its letters, as the text
   // has it), before the next word starts. At a slower pace a long madd can still be going on after the model has
   // named the word, so the highlight waits for the next word as before. (Display only: nothing is judged from it.)
+  // word check (see judgeNow): the correct words fit within SCORE_FIT of the model's own reading: no mistake;
+  // they miss by SCORE_SLIP or more: a mistake
+  const SCORE_FIT = 4, SCORE_SLIP = 12;
   const FAST_WPS = 1.3;
   function tailDone(c) {
     const t = ModelMic.tailNow;
@@ -845,7 +848,7 @@
     }
     postMessage(m) {
       if (m.type !== 'run') return; // the server has its own model
-      if (m.kind === 'verify' || m.seg < 0) { this.send({ t: 'full', kind: m.kind, seg: m.seg }, m.audio); return; }
+      if (m.kind === 'verify' || m.seg < 0) { this.send({ t: 'full', kind: m.kind, seg: m.seg, windows: m.windows }, m.audio); return; }
       const done = this.sent.get(m.seg) || 0;
       if (m.audio.length > done) { this.send({ t: 'chunk', seg: m.seg }, m.audio.subarray(done)); this.sent.set(m.seg, m.audio.length); }
       while (this.sent.size > 8) this.sent.delete(this.sent.keys().next().value);
@@ -985,7 +988,7 @@
         if (m.total) this.files[m.file] = { loaded: m.loaded, total: m.total };
         if (this.on) renderStatus();
       } else if (m.type === 'ready') {
-        this.updateSpeed(); this.ready = true; this.retries = 0; this.threads = m.threads || 1; this.lanes = m.lanes || 1; this.srvStream = m.stream || 0; this.inflightP = 0; this.models = m.models || null; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
+        this.updateSpeed(); this.ready = true; this.retries = 0; this.threads = m.threads || 1; this.lanes = m.lanes || 1; this.srvStream = m.stream || 0; this.inflightP = 0; this.models = m.models || null; this.canScore = !!m.score; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
       } else if (m.type === 'error') {
         this.failed = true;
         toast('Could not download the speech model. Check the connection and tap the mic again.', 6000);
@@ -993,7 +996,7 @@
       } else if (m.type === 'result') {
         if (this.twoLanes()) { if (m.kind === 'partial') { this.inflightP = Math.max(0, this.inflightP - 1); this.busyP = this.inflightP >= this.maxP(); } else { this.busyF = false; this.busyKind = ''; } this.busy = this.busyP || this.busyF; }
         else { this.busy = false; this.busyKind = ''; }
-        if (m.ms) {
+        if (m.ms && m.kind !== 'score') {
           this.ms.push(m.ms); if (this.ms.length > 8) this.ms.shift();
           // cost of a reading ~ a (fixed: the model always hears 30 s) + b per second of audio (writing it out)
           if (m.secs > 1.5) { this.perSec.push(Math.max(0, (m.ms - this.costA) / m.secs)); if (this.perSec.length > 6) this.perSec.shift(); }
@@ -1010,6 +1013,7 @@
         if (window.__asrLog) window.__asrLog.push({ kind: m.kind, seg: m.seg, ms: m.ms, secs: m.secs, at: performance.now(), text: m.text + (m.gap != null ? '  (gap ' + m.gap.toFixed(2) + ')' : '') }); // dev-only test log
         if (m.kind === 'final') this.chain = this.chain.then(() => this.judge(m.text, m.seg)).catch(() => {});
         else if (m.kind === 'verify' || m.kind === 'verifyc') { const f = this.verifyWait; this.verifyWait = null; if (f) f(m.text); }
+        else if (m.kind === 'score') { const f = this.verifyWait; this.verifyWait = null; if (f) f(m.error ? null : m.costs); }
         else {
           const whole = m.whole != null ? !!m.whole : this.partialWhole, gap = m.gap;
           // (two lanes: the earlier phrase may not be judged yet, or is being double-checked; its words come
@@ -1389,6 +1393,41 @@
       // the second reading also hears the end of the previous phrase: a different context makes the model
       // decode afresh (a garble caused by how the audio was cut, or by a fast join, is then not repeated)
       const prev = this.audioOf.get(seg - 1);
+      // Word check (the way Tilawa checks a mistake): the fast model's own scores for this audio say how well the
+      // CORRECT words fit it, next to what it wrote. The words around the suspected one must be found in the audio
+      // in order. They fit about as well as its own reading: it garbled them, the reciter was right; no stop. They
+      // fit far worse: the reciter said something else; stop now. In between: the second model reads it (below).
+      // (measured on 1076 words by 4 qaris: correct words fit within 4 in 99.5%; a wrong, skipped or near-miss word
+      // misses by 12 or more in 95-100%; see server/ctc-score.js)
+      if (this.remote && this.canScore && audioSeg && st1.pos >= 0 && st1.pos < M.N) {
+        // (runs of 3 with the word, to say it fits; both runs of 2 missing, to say it is a slip. A phrase of only one
+        // or two words (a reciter who pauses after بلى) has no neighbours to check: there the word alone decides. In a
+        // longer phrase the word alone could fit by chance somewhere else (يخلق in "خلق السماوات"), so it is not used)
+        const p = st1.pos, R = [[p - 2, p], [p - 1, p + 1], [p - 1, p], [p, p + 1], [p, p]].map(([a, b]) => [Math.max(0, a), Math.min(M.N - 1, b)]);
+        const t0 = performance.now();
+        const costs = await this.verify(audioSeg, prev ? prev.subarray(Math.max(0, prev.length - 24000)) : null, 'score', R.map(([a, b]) => M.keys.slice(a, b + 1)));
+        if (costs && costs.length === 5) {
+          const short = full.length <= 2;
+          const fit = Math.min(costs[0], costs[1], short ? costs[4] : Infinity), slip = Math.min(costs[2], costs[3], short ? costs[4] : Infinity), ms = Math.round(performance.now() - t0);
+          const decided = fit <= SCORE_FIT ? 'fits' : slip >= SCORE_SLIP ? 'slip' : 'unsure';
+          if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'word check at ' + M.disp[p] + ': fit ' + fit + ' slip ' + slip + ' -> ' + decided + ' (' + ms + ' ms)' }); // dev-only
+          report('check', { word: M.disp[p], at: where(p), fit, slip, decided, ms, wps: +wordsPerSec().toFixed(2) });
+          if (decided === 'slip') {
+            commit(text, true, true);
+            if (!P) { clearTimeout(idleTimer); T.flush(); handleEvents(); render(); }
+            return;
+          }
+          if (decided === 'fits') {
+            const strict = T.strict; T.strict = false;
+            try { commit(text, true, true); T.flush(); } finally { T.strict = strict; }
+            // (the words of the run that fit were said: whatever the reading made of them)
+            const [a, b] = costs[0] === fit ? R[0] : costs[1] === fit ? R[1] : R[4];
+            for (let x = a; x <= b; x++) if (T.state[x] !== CORRECT && T.state[x] !== PENDING && (x >= p || T.state[x] !== UNCLEAR)) T._mark(x, CORRECT);
+            handleEvents(); render();
+            return;
+          }
+        }
+      }
       // (Whisper can get stuck repeating a phrase, or time out: a broken second reading confirms nothing. Then the
       // fast model reads the same audio again, with the end of the previous phrase in front: a different decoding)
       // (a repeated run of 3+ words, e.g. "اليك البصوخاس ان ينقضني اليك البصوخاس ان", is Whisper looping too)
@@ -1501,7 +1540,7 @@
       commit(merged, true, true);
       if (!P) { clearTimeout(idleTimer); T.flush(); handleEvents(); render(); }
     },
-    verify(audioSeg, before, kind = 'verify') {
+    verify(audioSeg, before, kind = 'verify', windows) {
       return new Promise(res => {
         const lead = before ? before.length : 8000;
         const pad = new Float32Array(lead + audioSeg.length + 4800);
@@ -1510,7 +1549,7 @@
         const timer = setTimeout(() => { if (this.verifyWait === done) this.verifyWait = null; res(null); }, 25000);
         const done = t => { clearTimeout(timer); res(t); };
         this.verifyWait = done;
-        this.finals.unshift({ kind, seg: -1, audio: pad }); // before any later phrase
+        this.finals.unshift({ kind, seg: -1, audio: pad, windows }); // before any later phrase
         this.pump();
       });
     },
@@ -1523,7 +1562,7 @@
         // the server reads a final reading and a live reading side by side
         if (!this.busyF && this.finals.length) {
           const job = this.finals.shift(); this.busyF = true; this.busyKind = job.kind; this.inflightF = job; renderStatus();
-          this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio });
+          this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio, windows: job.windows });
         }
         if (!this.busyP && this.partial) {
           const job = this.partial; this.partial = null; this.partialWhole = !!job.whole;

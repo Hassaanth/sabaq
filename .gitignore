@@ -4,3 +4,4 @@ node_modules/
 .claude/
 server/node_modules/
 server/hf-cache/
+server/models/

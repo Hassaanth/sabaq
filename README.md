@@ -56,6 +56,12 @@ npm install
 npm start            # http://localhost:8787
 ```
 
+The fast model's files (`server/models/pc/model.int8.onnx`, `tokens.txt`) are not in the repository (131 MB).
+Build them once from NVIDIA's own checkpoint with `server/build-ctc-model.py` (its header has the four commands;
+needs Python with `onnx onnxruntime numpy pyyaml`), or set `CTC_URL` to a folder that hosts both files. The
+Docker image builds them itself. (The int8 export the server used to download, from OmarrGhorab/openbot-personal,
+was deleted in November 2026; the rebuilt model reads 108 ayahs by 4 qaris word for word the same.)
+
 **Models (chosen by measurement on Al-Mulk 1–10, Alafasy / Husary / Minshawi):**
 
 | Model | Words right | Reading 1 s / 7 s of audio | Used for |
@@ -93,7 +99,8 @@ moves to the next word only once it is heard. The microphone is captured with an
 nothing lost while the page is busy), with the older ScriptProcessor as the fallback.
 At 2.5x and beyond the (time-stretched) test audio itself gets garbled. A double-check of a suspected mistake
 (~2 s) no longer holds up following the words after it.
-Credits: NVIDIA (CC-BY-4.0; int8 export by OmarrGhorab/openbot-personal), Tarteel AI (Apache-2.0).
+Credits: NVIDIA (CC-BY-4.0; encoder export by LukeJacob2023 on Hugging Face), Tarteel AI (Apache-2.0); the word
+check follows Tilawa (yazinsai/tilawa, MIT).
 
 A page served by the server finds it by itself (it answers `/health`). Any other page can be pointed at one with
 `?asr=wss://host/asr` (remembered; `?asr=off` to stop). A phone needs HTTPS for the microphone, so the server must
@@ -203,12 +210,21 @@ Disconnect test (server killed 14 s in): reconnected by itself, 60/60 words foll
 1. A live reading that sees a mistake only marks the word "checking" (dashed amber underline) and ends the phrase
    early, so the check comes at once. It never stops anyone by itself.
 2. The phrase's full reading must show the mistake too.
-3. A second, different model (Whisper) reads the audio again, with the end of the previous phrase in front. If
+3. **Word check** (the way Tilawa checks a mistake, `server/ctc-score.js`): the fast model gives a probability for
+   every word piece every 80 ms. The server lines the *correct* words around the suspected one up with that audio
+   and measures how much worse they fit than the model's own reading. Within 4: the model garbled them and the
+   reciter was right; no stop, the words count as right. Worse by 12 or more: the reciter said something else; stop
+   at once. In between, the steps below decide. One model run plus a few milliseconds (~0.3–0.5 s in all, instead
+   of ~2 s for Whisper). Measured on 1,076 words recited by 4 qaris: correct words fit within 4 in 99.5%;
+   a different word, a word 1–2 letters off, or a skipped word misses by 12 or more in 95–100%. An added word is
+   mostly left to the steps below. Word gaps are ignored, so a join (wasl) or the Quran's own spelling (أمن for
+   أم من) is no difference. Each decision is reported to the server log as `phone check`.
+4. A second, different model (Whisper) reads the audio again, with the end of the previous phrase in front. If
    Whisper loops (a repeated 3-word run) or returns nothing, the fast model re-reads with that context instead.
-4. **The right audio:** if the suspected word was heard in an earlier phrase (fast recitation can cut a phrase
+5. **The right audio:** if the suspected word was heard in an earlier phrase (fast recitation can cut a phrase
    right next to a word), the tracker goes back to where that phrase began (up to 3 phrases / 14 s), the second
    reading covers all of that audio, and those phrases are judged again from both readings.
-5. A second reading that shows no mistake *and fits the Quran text* (no stray or unplaced words) clears it; a
+6. A second reading that shows no mistake *and fits the Quran text* (no stray or unplaced words) clears it; a
    reading that merely avoids a stop is not enough. Otherwise each word where the two readings differ is decided
    by what fits the text, and the stop happens only if a mistake is left that both readings heard.
 The "checking" mark disappears once this is decided.

@@ -102,7 +102,7 @@
     const qq = (a, f) => { const ok = a.filter(x => x != null).sort((x, y) => x - y); return ok.length ? ok[Math.min(ok.length - 1, Math.floor(f * ok.length))].toFixed(2) + 's' : '-'; };
     const ok = lags.filter(x => x != null).sort((x, y) => x - y), q = f => ok.length ? ok[Math.min(ok.length - 1, Math.floor(f * ok.length))].toFixed(1) + 's' : '-';
     return { pace: (lags.length / ((last - first) / 1000 / rate)).toFixed(2) + ' words/s', words: lags.length, followed: ok.length, median: q(0.5), p90: q(0.9), max: q(0.999), lags: lags.map(x => x == null ? 'x' : x.toFixed(1)).join(' '),
-      arriveMedian: qq(arr, 0.5), arriveP90: qq(arr, 0.9), arriveMax: qq(arr, 0.999), early: arr.filter(x => x != null && x < -0.15).length, jumps, backs };
+      arriveMedian: qq(arr, 0.5), arriveP90: qq(arr, 0.9), arriveMax: qq(arr, 0.999), early: arr.filter(x => x != null && x < -0.15).length, jumps, backs, arr: arr.map(x => x == null ? 'x' : x.toFixed(2)).join(' ') };
   }
   // position of a word in the whole Quran (first word of ayah a of surah s), from the page's own data
   function M_pos(s, a) { let p = 0; const Q = window.QURAN; for (let k = 0; k < s - 1; k++) for (const ay of Q[k].a) p += ay[0].split(' ').length; for (let k = 0; k < a - 1; k++) p += Q[s - 1].a[k][0].split(' ').length; return p; }

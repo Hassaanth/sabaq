@@ -172,7 +172,7 @@ export async function loadScorer(modelFile, tokensFile, threads = 2) {
   // the model's own reading. At the last frame: which of the words the reciter is on, whether it has begun, and
   // when (s); and how much worse the words fit than the model's own reading (a high value: not following).
   // words[0..anchor-1] are words already heard (to place the rest); the reciter is somewhere from there on.
-  function track({ lp, T }, words, anchor = 1) {
+  function track({ lp, T }, words, anchor = 1, lead = 1.5) {
     const { ch, alt, opt, L } = letters(words, false);
     if (!L) return null;
     // the word each letter belongs to, and where each word's letters begin
@@ -193,6 +193,8 @@ export async function loadScorer(modelFile, tokensFile, threads = 2) {
       for (let v = 0; v < V; v++) { const x = lp[o + v]; if (x > G) G = x; if (emptyN[v] && x > E) E = x; }
       best += G;
       if (free0 > B[0]) { B[0] = free0; Be[0] = -1; }
+      // (the reciter may begin a word or two later than expected: the page's cursor can be a little behind)
+      for (let k = 1; k <= 2 && k < words.length; k++) { const v = free0 - 3 * k; if (v > B[ws[k]]) { B[ws[k]] = v; Be[ws[k]] = -1; } }
       skip(B, K, Be, Ke);
       nB.fill(NEG); nK.fill(NEG); nKt.fill(-1);
       for (let i = 0; i <= L; i++) {
@@ -214,7 +216,7 @@ export async function loadScorer(modelFile, tokensFile, threads = 2) {
         }
       }
       skip(nB, nK, nBe, nKe);
-      free0 += G - 1.5; // (audio before the words: allowed (a breath, a noise), but it costs, so the words start as early as they can)
+      free0 += G - lead; // (audio before the words (a breath, a noise, the end of a word cut off): allowed, but it costs, so the words start as early as they can)
       [B, nB] = [nB, B]; [K, nK] = [nK, K]; [Kt, nKt] = [nKt, Kt]; [Be, nBe] = [nBe, Be]; [Ke, nKe] = [nKe, Ke];
     }
     // where the best path is now (only once it has reached the words after the anchor's start)

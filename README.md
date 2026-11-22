@@ -178,6 +178,31 @@ lag-test runs, and 0 of 2 lag runs + 0 of 1 session run just before the fix belo
 3 of 6 runs of the harder `fast22` session (`ONLY=fast22 node tests/sessions.cjs`: shorter breaths). Small samples:
 2.2× is better, not solved. Normal speed: no false marks before or after.
 
+#### Moving with the voice (smoothness)
+
+What other follow-along systems do (Tarteel, Tilawa, voice teleprompters, children's read-along apps, karaoke, score
+following in music) and what was measured here, on Al-Mulk 1–5, phone CPU emulated, timed from when the qari
+*begins* each word:
+
+- **Tried, measured, off by default (`?pace=1`): running ahead at the reciter's pace.** The readings' highlight
+  reaches a word ~0.37 s after the reciter starts it. "Reading Ahead" (NLP4CALL 2026) moves on when the current word
+  should be over at the reciter's pace (cut a read-along's delay from 264 to 87 ms). Here: pace in seconds per letter
+  (median of the last 8 words; a madd sign counts 3), voiced time only, one word ahead at most, never past an ayah's
+  end, and never past a word tajweed holds (a final long vowel or madd sign, tanween or iqlab/ikhfa marks, a doubled
+  ن or م). Alafasy: median 0.36–0.44 s → 0.21–0.35 s. But Husary (slow) had 16–24 of 60 words lit more than
+  0.15 s early (10 without it), some by 0.9 s, and the pace estimate wasn't steady enough to tell slow from normal.
+- **Long breaths stay quick.** Live readings re-read the phrase from its start, so they slowed as a phrase grew (83 ms
+  apart at its start, 365 ms 15 s in): a reciter who joins two ayahs in one breath saw the highlight fall behind. Past
+  9 s, a live reading now covers the phrase's last 6 s (`LIVE_WIN`, `LIVE_FROM`); the page places it where it joins
+  the words it already has. Rifai reciting ayahs 1–2 in one 20 s breath: a live reading every ~155 ms throughout. The
+  phrase's final reading, which judges mistakes, still reads all of it.
+- **Tried, measured, left off: frame-by-frame following** (`TRACK=1`, `server/ctc-score.js` `track`). The server
+  lines the newest audio up with the expected words every 40 ms, as score followers and teleprompters do. Offline it
+  reached words sooner than counting the words of a reading, but in the app it was no sooner than the highlight
+  already is (that already moves the moment a reading shows the next word starting), so it would only cost CPU.
+- Not adopted: a true streaming model. No complete streaming Arabic model of this kind was found (the published
+  "streaming" exports are broken or mislabelled); Tilawa's streaming phoneme model is the candidate for later.
+
 #### Keeping up with a fast reciter (hadr)
 
 Above 1.3 words/s (measured from the highlight's own steps over the last 4 s), Sabaq changes four things.

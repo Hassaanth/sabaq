@@ -120,7 +120,7 @@ const loading = (async () => {
 })();
 // which model reads which kind of job
 const modelFor = kind => (NAMES.live === 'fastconformer-ctc' ? (kind === 'verify' ? read$.slow : read$.fast) : (kind === 'partial' ? read$.fast : read$.slow));
-const laneFor = kind => (LANES >= 2 ? (kind === 'verify' ? 'slow' : 'fast') : 'one');
+const laneFor = kind => (kind === 'track' || (kind === 'score' && scorer && LANES >= 2) ? 'track' : LANES >= 2 ? (kind === 'verify' ? 'slow' : 'fast') : 'one');
 
 // rolling timings per kind of reading (for /health and the log): model time, and wait from audio in to model start
 const stats = { started: Date.now(), jobs: 0, errors: 0, dropped: 0, refused: 0, by: {} };
@@ -131,12 +131,12 @@ function note(kind, ms, wait) {
 const pct = (a, q) => { if (!a.length) return null; const s = a.slice().sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
 const summary = () => Object.fromEntries(Object.entries(stats.by).map(([k, b]) => [k, { n: b.n, msMedian: pct(b.ms, 0.5), msP90: pct(b.ms, 0.9), waitMedian: pct(b.wait, 0.5), waitP90: pct(b.wait, 0.9) }]));
 const queue = [];
-const busy = { fast: false, slow: false, one: false };
-const lastServed = { fast: null, slow: null, one: null };
+const busy = { fast: false, slow: false, one: false, track: false };
+const lastServed = { fast: null, slow: null, one: null, track: null };
 const lives = new Set(); // connections streaming a phrase as it is recited
 function pump() {
   if (!read$.fast || !read$.slow) return;
-  for (const lane of LANES >= 2 ? ['fast', 'slow'] : ['one']) {
+  for (const lane of LANES >= 2 ? (scorer ? ['fast', 'slow', 'track'] : ['fast', 'slow']) : ['one']) {
     if (busy[lane]) continue;
     // phrase readings and double-checks first, then live readings
     // (reciters take turns on each lane: someone with many queued phrases can't hold up everyone else)
@@ -146,10 +146,12 @@ function pump() {
     if (i < 0) i = pick(() => true);
     if (i >= 0) { run(queue.splice(i, 1)[0], lane); continue; }
     if (lane === 'fast') { const job = liveJob(); if (job) run(job, lane); }
+    if (lane === 'track') { const job = trackJob(); if (job) run(job, lane); }
   }
 }
 // The newest audio of a streamed phrase, if 80 ms more of it arrived since its last reading (or a pause began:
 // its last word is then complete), with the faint noise after it (see below)
+const LIVE_WIN = Math.round(16000 * (+process.env.LIVE_WIN || 6)), LIVE_FROM = Math.round(16000 * (+process.env.LIVE_FROM || 9));
 function liveJob() {
   for (const ws of lives) {
     const L = ws.live;
@@ -157,13 +159,41 @@ function liveJob() {
     const s = ws.segs.get(L.seg);
     if (!s || s.len < 8000) continue;
     if (!(s.len - L.done >= 1280 || (L.whole && !L.doneWhole && s.len > L.done))) continue;
-    const audio = new Float32Array(s.len + PAD); let o = 0;
-    for (const p of s.parts) { audio.set(p, o); o += p.length; }
-    audio.set(NOISE, s.len);
+    // (a long phrase: only its last LIVE_WIN s. Reading the whole phrase every time costs more and more as it grows
+    // (83 ms between readings at its start, 365 ms 15 s in), and the highlight falls behind a reciter who recites two
+    // ayahs in one breath. The page finds where these words join the ones it already has. The phrase's final
+    // reading still reads all of it.)
+    const from = s.len > LIVE_FROM ? s.len - LIVE_WIN : 0, n = s.len - from;
+    const audio = new Float32Array(n + PAD); let o = 0, skip = from;
+    for (const p of s.parts) { if (skip >= p.length) { skip -= p.length; continue; } const part = p.subarray(skip); skip = 0; audio.set(part, o); o += part.length; }
+    audio.set(NOISE, n);
     L.done = s.len; L.doneWhole = L.whole;
     // (round robin between connections)
     lives.delete(ws); lives.add(ws);
-    return { ws, kind: 'partial', seg: L.seg, whole: L.whole, pad: PAD, audio, rx: s.rx, cap: s.cap };
+    return { ws, kind: 'partial', seg: L.seg, whole: L.whole, pad: PAD, audio, rx: s.rx, cap: s.cap, len: s.len, skip: from / 16000 };
+  }
+  return null;
+}
+// Frame-by-frame following of a streamed phrase: the last 2 s of its audio (whatever the phrase's length, so each
+// costs the same, ~50 ms), lined up with the words the page expects next, whenever 40 ms more audio came in. Its
+// own lane, beside the live readings: those still give the words and the mistakes; this only places the highlight.
+// (off unless TRACK=1: measured in the app, it placed the highlight no sooner than the live readings already do)
+const TRACK = process.env.TRACK === '1';
+const TRACK_SECS = +process.env.TRACK_SECS || 2, TRACK_PAD = Math.round(16000 * (process.env.TRACK_PAD != null ? +process.env.TRACK_PAD : 0.3));
+function trackJob() {
+  if (!TRACK) return null;
+  for (const ws of lives) {
+    const L = ws.live;
+    if (!L || ws.readyState !== 1 || !L.win) continue;
+    const s = ws.segs.get(L.seg);
+    if (!s || s.len < 4800 || s.len - (L.tdone || 0) < 640) continue;
+    const n = Math.min(s.len, Math.round(16000 * TRACK_SECS)), audio = new Float32Array(n + TRACK_PAD);
+    let o = 0, skip = s.len - n;
+    for (const p of s.parts) { if (skip >= p.length) { skip -= p.length; continue; } const part = p.subarray(skip); skip = 0; const take = Math.min(part.length, n - o); audio.set(part.subarray(0, take), o); o += take; if (o >= n) break; }
+    audio.set(NOISE.subarray(0, TRACK_PAD), n);
+    L.tdone = s.len;
+    lives.delete(ws); lives.add(ws);
+    return { ws, kind: 'track', seg: L.seg, pad: TRACK_PAD, audio, win: L.win, rx: s.rx, cap: s.cap };
   }
   return null;
 }
@@ -171,9 +201,13 @@ async function run(job, lane) {
   busy[lane] = true; lastServed[lane] = job.ws;
   const t = Date.now();
   let text = '', gap = null, error;
-  let costs;
+  let costs, track;
   try {
-    if (job.kind === 'score') { if (!scorer) throw new Error('no word check'); const lp = await scorer.logprobs(job.audio); costs = job.windows.map(w => +scorer.cost(lp, w).toFixed(2)); }
+    // frame-by-frame following: where in the expected words the reciter is now (see trackJob)
+    if (job.kind === 'track') {
+      const lp = await scorer.logprobs(job.audio), tr = scorer.track(lp, job.win.words, 0, 0.5);
+      if (tr) track = { base: job.win.base, w: tr.w, begun: tr.begun, excess: tr.excess };
+    } else if (job.kind === 'score') { if (!scorer) throw new Error('no word check'); const lp = await scorer.logprobs(job.audio); costs = job.windows.map(w => +scorer.cost(lp, w).toFixed(2)); }
     else { const r = await modelFor(job.kind)(job.audio); if (typeof r === 'string') text = r; else { text = r.text; gap = r.gap == null ? null : Math.max(0, r.gap - (job.pad || 0) / 16000); } }
   } catch (e) { error = String((e && e.message) || e); }
   busy[lane] = false;
@@ -181,7 +215,7 @@ async function run(job, lane) {
   stats.jobs++; if (error) { stats.errors++; log('reading failed (' + job.kind + '):', error); } note(job.kind, ms, wait);
   // timings: wait = from the newest audio arriving to the model starting on it; ms = the model's own time;
   // cap = the phone's clock stamp of that audio, sent back so the phone can measure the whole round trip
-  if (job.ws.readyState === 1) job.ws.send(JSON.stringify({ type: 'result', id: job.id, kind: job.kind, seg: job.seg, text, gap, costs, whole: job.whole, len: job.audio.length - (job.pad || 0), error, ms, wait, cap: job.cap, secs: (job.audio.length - (job.pad || 0)) / 16000 }));
+  if (job.ws.readyState === 1) job.ws.send(JSON.stringify({ type: 'result', id: job.id, kind: job.kind, seg: job.seg, text, gap, costs, track, whole: job.whole, len: job.len != null ? job.len : job.audio.length - (job.pad || 0), skip: job.skip || undefined, error, ms, wait, cap: job.cap, secs: (job.audio.length - (job.pad || 0)) / 16000 }));
   pump();
 }
 loading.then(pump);
@@ -260,7 +294,7 @@ wss.on('connection', (ws, req) => {
   log('reciter connected (' + wss.clients.size + ' open)' + (req && req.headers.origin ? ' from ' + req.headers.origin : ''));
   const segs = new Map(); // seg -> { parts: Float32Array[], len }
   ws.segs = segs; ws.live = null;
-  const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true, lanes: LANES, models: NAMES, stream: LANES >= 2 ? 3 : 2, score: scorer ? 1 : 0 }));
+  const hello = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ready', warm, threads: 0, server: true, lanes: LANES, models: NAMES, stream: LANES >= 2 ? 3 : 2, score: scorer ? 1 : 0, track: TRACK && scorer && LANES >= 2 ? 1 : 0 }));
   if (read$.fast && read$.slow) hello(); else loading.then(hello);
   ws.on('message', (data, isBinary) => { try { onMessage(data, isBinary); } catch (e) { console.error('bad message:', e && e.message); } });
   const onMessage = (data, isBinary) => {
@@ -277,8 +311,11 @@ wss.on('connection', (ws, req) => {
       const a = toFloat(pcm); s.parts.push(a); s.len += a.length; s.rx = Date.now(); s.cap = head.cap;
       // {live: 1}: the phrase being recited now, streamed; whole: its audio ends in a short pause
       if (head.live && LANES >= 2) {
-        if (!ws.live || ws.live.seg !== head.seg) { if (ws.live && head.seg < ws.live.seg) return; ws.live = { seg: head.seg, done: 0, whole: false, doneWhole: false }; }
+        if (!ws.live || ws.live.seg !== head.seg) { if (ws.live && head.seg < ws.live.seg) return; ws.live = { seg: head.seg, done: 0, whole: false, doneWhole: false, win: ws.live && ws.live.win }; }
         ws.live.whole = !!head.whole;
+        // (the words expected next, for following the reciter frame by frame: see ctc-score.js track)
+        const W = head.win;
+        if (W && Array.isArray(W.words) && W.words.length && W.words.length <= 40 && W.words.every(x => typeof x === 'string' && x.length <= 40) && Number.isInteger(W.base)) ws.live.win = { base: W.base, words: W.words };
         lives.add(ws); pump();
       }
       return;

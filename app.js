@@ -120,6 +120,8 @@
   // word check (see judgeNow): the correct words fit within SCORE_FIT of the model's own reading: no mistake;
   // they miss by SCORE_SLIP or more: a mistake
   const SCORE_FIT = 4, SCORE_SLIP = 12;
+  // frame-by-frame following: trusted while the expected words fit the phrase's audio within this
+  const TRACK_EXCESS = 20;
   const FAST_WPS = 1.3;
   function tailDone(c) {
     const t = ModelMic.tailNow;
@@ -133,9 +135,66 @@
     const k = M.keys[c];
     return t.w === k || (t.w.length >= k.length && E.sim(t.w, k) >= 0.9);
   }
+  // Keeping pace with the voice (as the best read-along apps do): the readings' highlight reaches a word ~0.35 s
+  // after the reciter starts it (the model must hear the word first, then the audio travels and is read). When the
+  // word on the highlight should be over at the reciter's own pace, and they are still reciting, the highlight goes
+  // on to the next word without waiting for the reading: at most one word ahead of the readings, never during a
+  // pause (the time counted is voiced time only), never past an ayah's end (held long), never while stopped. The
+  // readings then confirm it. Pace: seconds per beat (a letter; a madd sign counts 3, a small alif 2), learnt from
+  // how long the readings' highlight stays on each word (both ends lag the voice alike). Display only.
+  const beats = p => { const d = M.disp[p] || ''; return Math.max(2, M.keys[p].length + 2 * (d.match(/ٓ/g) || []).length + (d.match(/ٰ/g) || []).length); };
+  const ahead = { rc: -1, voiced: 0, last: 0, perBeat: 0.13, n: 0, pred: -1, timer: 0, paused: false };
+  window.__sabaqPerBeat = () => +ahead.perBeat.toFixed(3);
+  const PACE_LAG = 200; // ms: part of how far behind the voice the readings' highlight is (measured median ~0.37 s)
+  // A word whose sound is held by the rules of tajweed, for a length no pace can tell: a long vowel at its end or a
+  // madd sign (madd), tanween or the small iqlab/ikhfa marks, or a doubled ن or م (ghunnah). The highlight never runs
+  // ahead past one of these: it waits for the reading there.
+  const HELD = /[ًٓ-ٍۭۢ]|[نم]ّ|[اىوي][ٰۦۥ]?$/;
+  const heldWord = p => { const d = (M.disp[p] || '').replace(/[َ-ِْ۟۠]/g, ''); return HELD.test(d) || /[اوي]$/.test(M.keys[p]); };
+  // (off unless ?pace=1: measured, it cut Alafasy's delay a little but lit a slow reciter's words early too often)
+  const PACE_OFF = !/[?&]pace=1/.test(location.search);
+  const PACE_SLOW = +(new URLSearchParams(location.search).get("paceslow") || 0.25); // s per beat: slower than this, no running ahead
+  function keepPace(c, free) {
+    const now = performance.now(), dt = ahead.last ? Math.min(200, now - ahead.last) : 0; ahead.last = now;
+    const voicing = Input.kind === 'model' && ModelMic.on && ModelMic.inSpeech && ModelMic.silence < 150;
+    if (c !== ahead.rc) {
+      // (a step of one word the readings made, with no pause in it: a measure of the pace)
+      if (ahead.rc >= 0 && c === ahead.rc + 1 && !ahead.paused && ahead.voiced > 120 && ahead.voiced < 3000) {
+        // (the median of the last 8 words, a held word (2.5 times the pace or more) left out)
+        const s = ahead.voiced / 1000 / beats(ahead.rc);
+        if (ahead.n < 3 || s < ahead.perBeat * 2.5) {
+          (ahead.samples = ahead.samples || []).push(s); if (ahead.samples.length > 8) ahead.samples.shift();
+          const o = ahead.samples.slice().sort((x, y) => x - y); ahead.perBeat = o[o.length >> 1]; ahead.n++;
+        }
+      }
+      ahead.rc = c; ahead.voiced = 0; ahead.paused = false; ahead.pred = -1;
+    } else if (voicing) ahead.voiced += dt;
+    if (!voicing) ahead.paused = true;
+    if (ahead.pred === c + 1) return c + 1; // (once ahead, it stays ahead until the readings catch up: never back)
+    if (PACE_OFF || !free || ahead.n < 5 || T.stopped >= 0 || c < 0 || c + 1 >= M.N || M.ayahStart[c + 1] || ModelMic.suspectAt >= 0) return c;
+    // (and not at a slow, measured pace: there a word lasts long next to the readings' delay, and a word lit a second
+    // early (measured on Husary) jars more than a highlight a little behind)
+    if (heldWord(c) || ahead.perBeat > PACE_SLOW) return c;
+    const due = Math.max(150, ahead.perBeat * beats(c) * 1000 * 1.2 - PACE_LAG);
+    if (voicing && ahead.voiced >= due) { ahead.pred = c + 1; return c + 1; }
+    // (look again when it would be due)
+    if (voicing && !ahead.timer) ahead.timer = setTimeout(() => { ahead.timer = 0; render(false); }, Math.max(30, due - ahead.voiced + 10));
+    return c;
+  }
   function shownCursor(view) {
     let c = view.c + heldAhead(view);
-    if (tailDone(c)) c++;
+    const passed = tailDone(c);
+    if (passed) c++;
+    c = keepPace(c, !passed);
+    // Frame-by-frame following (the server lines the audio up with the words expected next, as read-along apps and
+    // voice teleprompters do): the reciter has begun the next word before the reading has it in full. The highlight
+    // goes there at once, at most 2 words ahead of what the readings show, never while stopped or when the words
+    // stopped fitting the audio. Display only: mistakes are judged from the readings as before.
+    const tk = ModelMic.track;
+    if (tk && T.strict !== null && T.stopped < 0 && view.c >= 0 && tk.seg === ModelMic.seg && ModelMic.inSpeech && performance.now() - tk.at < 1500 && tk.excess <= TRACK_EXCESS) {
+      const tc = tk.base + (tk.begun ? tk.w : Math.max(0, tk.w - 1));
+      if (tc > c && tc <= c + 2 && tc < M.N) c = tc;
+    }
     const now = performance.now();
     if (c < hold.c && now < hold.until && T.c >= hold.tc && T.c <= hold.c && T.stopped < 0 && view.c >= 0) c = hold.c;
     else if (c !== hold.c) hold.until = now + 1200;
@@ -855,8 +914,8 @@
       this.send({ t: 'run', kind: m.kind, seg: m.seg, len: m.audio.length, whole: !!m.whole, cap: m.cap });
     }
     // streaming: more audio of the phrase being recited (the server reads it as it comes)
-    sendChunk(seg, pcm, whole, cap) {
-      this.send({ t: 'chunk', seg, live: 1, whole: !!whole, cap }, pcm);
+    sendChunk(seg, pcm, whole, cap, win) {
+      this.send(win ? { t: 'chunk', seg, live: 1, whole: !!whole, cap, win } : { t: 'chunk', seg, live: 1, whole: !!whole, cap }, pcm);
       this.sent.set(seg, (this.sent.get(seg) || 0) + pcm.length);
       while (this.sent.size > 8) this.sent.delete(this.sent.keys().next().value);
     }
@@ -1045,11 +1104,16 @@
         if (m.total) this.files[m.file] = { loaded: m.loaded, total: m.total };
         if (this.on) renderStatus();
       } else if (m.type === 'ready') {
-        this.updateSpeed(); this.ready = true; this.retries = 0; this.threads = m.threads || 1; this.lanes = m.lanes || 1; this.srvStream = m.stream || 0; this.inflightP = 0; this.models = m.models || null; this.canScore = !!m.score; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
+        this.updateSpeed(); this.ready = true; this.retries = 0; this.threads = m.threads || 1; this.lanes = m.lanes || 1; this.srvStream = m.stream || 0; this.inflightP = 0; this.models = m.models || null; this.canScore = !!m.score; this.canTrack = !!m.track; this.winBase = -1; if (m.warm) this.costA = m.warm; renderStatus(); this.pump();
       } else if (m.type === 'error') {
         this.failed = true;
         toast('Could not download the speech model. Check the connection and tap the mic again.', 6000);
         this.worker.terminate(); this.worker = null; this.stop();
+      } else if (m.type === 'result' && m.kind === 'track') {
+        // where the server's frame-by-frame following puts the reciter in the expected words (its own lane: no
+        // reading of ours was waiting for it)
+        if (m.track && m.seg === this.seg) { this.track = { seg: m.seg, base: m.track.base, w: m.track.w, begun: m.track.begun, excess: m.track.excess, at: performance.now() }; render(false); }
+        if (window.__asrLog) window.__asrLog.push({ kind: 'track', seg: m.seg, at: performance.now(), text: m.track ? 'base ' + m.track.base + ' w ' + m.track.w + (m.track.begun ? ' begun' : '') + ' excess ' + m.track.excess + ' ms ' + m.ms + ' (cursor ' + lastCursor + ')' : 'no track' }); // dev-only
       } else if (m.type === 'result') {
         if (this.twoLanes()) { if (m.kind === 'partial') { this.inflightP = Math.max(0, this.inflightP - 1); this.busyP = this.inflightP >= this.maxP(); } else { this.busyF = false; this.busyKind = ''; } this.busy = this.busyP || this.busyF; }
         else { this.busy = false; this.busyKind = ''; }
@@ -1078,8 +1142,8 @@
           const whole = m.whole != null ? !!m.whole : this.partialWhole, gap = m.gap;
           // (two lanes: the earlier phrase may not be judged yet, or is being double-checked; its words come
           // first, so this one only moves the highlight for now, at once, and locks nothing in)
-          if ([...this.pendingFinal].some(x => x < m.seg) || (this.judging != null && this.judging < m.seg)) this.peek(m.text, m.seg, whole, gap);
-          else this.chain = this.chain.then(() => { this.live(m.text, m.seg, whole, gap); if (d) { d.align = performance.now() - d.rx; Diag.pending = d; render(false); } }).catch(() => {});
+          if ([...this.pendingFinal].some(x => x < m.seg) || (this.judging != null && this.judging < m.seg)) { if (!m.skip) this.peek(m.text, m.seg, whole, gap); }
+          else this.chain = this.chain.then(() => { this.live(m.text, m.seg, whole, gap, m.skip); if (d) { d.align = performance.now() - d.rx; Diag.pending = d; render(false); } }).catch(() => {});
         }
         this.updateSpeed(); this.showSpeed();
         this.pump();
@@ -1282,7 +1346,14 @@
           const out = new Float32Array(this.unsentLen); let o = 0;
           for (const b of this.unsent) { out.set(b, o); o += b.length; }
           this.unsent = []; this.unsentLen = 0;
-          this.worker.sendChunk(this.seg, out, this.silence >= 100, Math.round(performance.now()));
+          // (with the phrase's first piece: the words expected from where the phrase began, so the server can follow
+          // the reciter through them frame by frame)
+          // (the words expected next, from two before the highlight, whenever the highlight moved: the server follows
+          // the reciter through them frame by frame)
+          let win = null;
+          const wb = this.canTrack && T.c >= 0 && lastCursor >= 0 && lastCursor < M.N && T.stopped < 0 ? Math.max(0, lastCursor - 2) : -1;
+          if (wb >= 0 && (wb !== this.winBase || this.winSeg !== this.seg)) { this.winBase = wb; this.winSeg = this.seg; win = { base: wb, words: M.keys.slice(wb, wb + 20) }; }
+          this.worker.sendChunk(this.seg, out, this.silence >= 100, Math.round(performance.now()), win);
         }
       }
       if (this.silence >= 650) { this.endSegment(); return; }
@@ -1339,15 +1410,23 @@
     // for good) at once: nothing to judge, so no risk of a false mistake. Anything that looks wrong waits for
     // the phrase's final reading and its double-check (two live readings of the same audio often share a
     // garbled word, so their agreeing proves nothing). The rest is shown as a preview.
-    live(text, seg, whole, gap) {
+    // skip: the reading covers only the end of a long phrase (the server reads its last 6 s): it is placed where it
+    // joins the words already locked in (at least two of them found in it), or not used
+    live(text, seg, whole, gap, skip) {
       if (seg <= this.judgedSeg) return;
       const all = E.tokenize(text), words = whole ? all : all.slice(0, -1), tail = whole ? null : all[all.length - 1] || null;
       const A = this.agree.seg === seg ? this.agree : (this.agree = { seg, prev: [], done: 0, locked: [] });
-      A.prev = words;
+      let joinAt = -1;
+      if (skip) {
+        const n = A.locked.length, need = Math.min(2, n);
+        if (!n) return;
+        for (let j = words.length; j >= need && joinAt < 0; j--) { let sc = 0; for (let k = 1; k <= need; k++) { const a = words[j - k], b = A.locked[n - k]; if (a === b || E.sim(a, b) >= 0.7) sc++; else break; } if (sc === need) joinAt = j; }
+        if (joinAt < 0) return;
+      } else A.prev = words;
       this.tailNow = tail ? { seg, w: tail, at: performance.now(), n: this.tailNow && this.tailNow.seg === seg && this.tailNow.w === tail ? this.tailNow.n + 1 : 1 } : null;
       // Readings of the same phrase don't always start alike (one may add or drop a garbled first word), so
       // where the locked-in words end is found by matching them, never by counting.
-      const start0 = alignAfter(words, A.locked);
+      const start0 = skip ? joinAt : alignAfter(words, A.locked);
       const start = start0 >= 0 ? start0 : Math.min(A.locked.length, words.length); // (not found: by position)
       let n = start;
       // (only words the tracker has confirmed: the last word or two still wait for what follows them, and

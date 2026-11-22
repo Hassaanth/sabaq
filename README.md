@@ -122,6 +122,8 @@ slower in-browser model take over, said on screen, and the phone tries the serve
 | `PAD` | 0.6 | seconds of faint noise after each live reading (see Streaming) |
 | `LOG_EVERY` | 60 | seconds between activity summaries in the log; 0 = off |
 | `HF_CACHE` | system temp | where the models are downloaded (keep it on a persistent disk) |
+| `CTC_DIR` / `CTC_URL` | `server/models/pc` / none | where the fast model's files are; a folder URL to download them from if missing |
+| `RECORD` | off | `1`: keep the recordings that pages opened with `?record=1` send (in `server/recordings`, 500 MB at most) |
 
 Reciters take turns on each model lane, so one person's long backlog can't hold up the others. Each connection
 is checked every 20 s (a phone that vanished is let go within ~40 s). On SIGTERM/SIGINT the server stops taking
@@ -272,6 +274,15 @@ node tests/stress.test.js     # 60,000-word noisy-recitation simulation
    start mid-surah; lock the screen for a few seconds and come back (it should say to tap the mic if iOS took the
    microphone away); switch Wi-Fi off and on mid-ayah (it should say "Reconnecting…" and carry on).
 4. If something looks wrong, a screenshot of the debug box plus what you recited is enough to trace it.
+5. **Recording a session to replay it** (to find why something went wrong with a real voice): start the server
+   with `RECORD=1`, open the site with `?record=1` (a red "Recording for testing" badge shows; `?record=0` ends it).
+   What the microphone hears goes, in 5 s pieces of 16 kHz audio, only to that server, into `server/recordings`;
+   the server log's `phone stop` lines then carry the recording's name and what was heard. Such a recording can be
+   played back through the app's real microphone path in a test browser.
+
+**If the computer sleeps,** the free tunnel's address dies; `start-public.js` opens a new one within ~3 minutes and
+publishes it. A page that was open looks the new address up by itself (from the second reconnect try, and every
+15 s while it uses the in-browser model) and switches back to the server. Keep the computer awake while reciting.
 
 ## Files
 

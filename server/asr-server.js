@@ -39,6 +39,9 @@ const MAX_CONNS = +process.env.MAX_CONNS || 24;
 const MAX_JOBS = +process.env.MAX_JOBS || 6;
 const ORIGINS = (process.env.ORIGINS || '').split(',').map(x => x.trim()).filter(Boolean);
 const LOG_EVERY = process.env.LOG_EVERY != null ? +process.env.LOG_EVERY : 60;
+// RECORD=1: keep the recordings a page opened with ?record=1 sends (for testing; in server/recordings)
+const RECORD = process.env.RECORD === '1';
+const REC_DIR = path.join(HERE, 'recordings');
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const MODEL = process.env.MODEL || 'eventhorizon0/tarteel-ai-onnx-whisper-base-ar-quran';
 const FALLBACK_LIVE = 'Sharjeelbaig/whisper-tiny-ar-quran-onnx';
@@ -201,6 +204,30 @@ const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', c => { if (body.length < 4000) body += c; });
     req.on('end', () => { res.writeHead(204, cors); res.end(); let j = null; try { j = JSON.parse(body); } catch (e) { /* not ours */ } if (j && typeof j.what === 'string') log('phone ' + j.what.slice(0, 20) + ':', JSON.stringify(j).slice(0, 600)); });
+    return;
+  }
+  // Recording for testing (the page opened with ?record=1; kept only when this server runs with RECORD=1): 16 kHz
+  // 16-bit audio in pieces, appended to recordings/<session>.pcm, with an index of when each piece began
+  if (name === 'record') {
+    const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type', 'access-control-allow-methods': 'POST' };
+    if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return; }
+    const q = new URL(req.url, 'http://x').searchParams, sid = q.get('sid') || '', i = +q.get('i'), t = +q.get('t');
+    if (req.method !== 'POST' || !RECORD || !/^[a-z0-9]{4,24}$/.test(sid) || !Number.isFinite(i) || !Number.isFinite(t)) { req.resume(); res.writeHead(RECORD ? 400 : 403, cors); res.end(); return; }
+    const parts = []; let n = 0, over = false;
+    req.on('data', c => { n += c.length; if (n > 16000 * 2 * 12) over = true; else parts.push(c); });
+    req.on('end', () => {
+      res.writeHead(over ? 413 : 204, cors); res.end();
+      if (over || !n) return;
+      try {
+        fs.mkdirSync(REC_DIR, { recursive: true });
+        const used = fs.readdirSync(REC_DIR).reduce((s, f) => s + fs.statSync(path.join(REC_DIR, f)).size, 0);
+        if (used > 500 * 1048576) return; // (at most 500 MB in all)
+        const file = path.join(REC_DIR, sid + '.pcm'), at = fs.existsSync(file) ? fs.statSync(file).size : 0;
+        fs.appendFileSync(file, Buffer.concat(parts));
+        fs.appendFileSync(path.join(REC_DIR, sid + '.txt'), JSON.stringify({ i, t, byteAt: at, bytes: n, rx: new Date().toISOString() }) + '\n');
+        if (i === 0) log('recording a session for testing:', sid);
+      } catch (e) { log('recording failed:', e.message); }
+    });
     return;
   }
   if (!FILES.has(name)) { res.writeHead(404); res.end('not found'); return; }

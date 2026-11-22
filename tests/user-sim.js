@@ -79,20 +79,30 @@
   // Highlight lag: recite ayahs straight through and measure, for every word, how long after it was said
   // (end of the word in the audio) the highlight moved past it. Timed on the audio clock.
   async function lag(s, a1, a2, rate = 1) {
-    const t = await surah(s), ctx = window.__fakeCtx, passed = new Map();
+    const t = await surah(s), ctx = window.__fakeCtx, passed = new Map(), arrived = new Map();
+    // smoothness: how often the highlight jumps over words or goes back
+    let prevCur = -1, jumps = 0, backs = 0;
     // (a DOM observer fires the moment the highlight moves; timers are throttled in a background tab)
-    const seen = () => { const c = document.querySelector('.w.cur'); const p = c ? +c.dataset.p : -1; for (let q = p - 1; q >= 0 && !passed.has(q); q--) passed.set(q, ctx.currentTime); };
+    const seen = () => { const c = document.querySelector('.w.cur'); const p = c ? +c.dataset.p : -1;
+      if (p >= 0 && prevCur >= 0 && p !== prevCur) { if (p - prevCur >= 2) jumps++; else if (p < prevCur) backs++; }
+      if (p >= 0) prevCur = p;
+      for (let q = p; q >= 0 && !arrived.has(q); q--) arrived.set(q, ctx.currentTime);
+      for (let q = p - 1; q >= 0 && !passed.has(q); q--) passed.set(q, ctx.currentTime); };
     const mo = new MutationObserver(seen); mo.observe(document.getElementById('quran'), { subtree: true, attributes: true, attributeFilter: ['class'] });
     const watch = Promise.resolve(); let on = true;
     const first = t.ayahs[a1][0][0], last = t.ayahs[a2][t.ayahs[a2].length - 1][1];
     window.__played = [];
     await __play([{ url: t.url, from: first, to: last, rate }, { silence: 6000 }]);
     on = false; await watch; mo.disconnect();
-    const start = window.__played[0].at, base = M_pos(s, a1), lags = [];
+    const start = window.__played[0].at, base = M_pos(s, a1), lags = [], arr = [];
     let i = 0;
-    for (let a = a1; a <= a2; a++) for (const [, end] of t.ayahs[a]) { const p = base + i++; const said = start + (end - first) / 1000 / rate; lags.push(passed.has(p) ? passed.get(p) - said : null); }
+    for (let a = a1; a <= a2; a++) for (const [beg, end] of t.ayahs[a]) { const p = base + i++; const said = start + (end - first) / 1000 / rate; lags.push(passed.has(p) ? passed.get(p) - said : null);
+      // (when the highlight reached the word, from when the reciter began it)
+      arr.push(arrived.has(p) ? arrived.get(p) - (start + (beg - first) / 1000 / rate) : null); }
+    const qq = (a, f) => { const ok = a.filter(x => x != null).sort((x, y) => x - y); return ok.length ? ok[Math.min(ok.length - 1, Math.floor(f * ok.length))].toFixed(2) + 's' : '-'; };
     const ok = lags.filter(x => x != null).sort((x, y) => x - y), q = f => ok.length ? ok[Math.min(ok.length - 1, Math.floor(f * ok.length))].toFixed(1) + 's' : '-';
-    return { pace: (lags.length / ((last - first) / 1000 / rate)).toFixed(2) + ' words/s', words: lags.length, followed: ok.length, median: q(0.5), p90: q(0.9), max: q(0.999), lags: lags.map(x => x == null ? 'x' : x.toFixed(1)).join(' ') };
+    return { pace: (lags.length / ((last - first) / 1000 / rate)).toFixed(2) + ' words/s', words: lags.length, followed: ok.length, median: q(0.5), p90: q(0.9), max: q(0.999), lags: lags.map(x => x == null ? 'x' : x.toFixed(1)).join(' '),
+      arriveMedian: qq(arr, 0.5), arriveP90: qq(arr, 0.9), arriveMax: qq(arr, 0.999), early: arr.filter(x => x != null && x < -0.15).length, jumps, backs };
   }
   // position of a word in the whole Quran (first word of ayah a of surah s), from the page's own data
   function M_pos(s, a) { let p = 0; const Q = window.QURAN; for (let k = 0; k < s - 1; k++) for (const ay of Q[k].a) p += ay[0].split(' ').length; for (let k = 0; k < a - 1; k++) p += Q[s - 1].a[k][0].split(' ').length; return p; }

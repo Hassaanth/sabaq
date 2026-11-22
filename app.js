@@ -485,7 +485,7 @@
         soundStop();
         if (canVibrate()) { try { navigator.vibrate([70, 50, 70]); } catch (err) { /* not allowed */ } }
         Coach.stop(e.pos, e.state);
-        report('stop', { word: M.disp[e.pos], at: where(e.pos), state: e.state, wps: +wordsPerSec().toFixed(2) });
+        report('stop', { word: M.disp[e.pos], at: where(e.pos), state: e.state, wps: +wordsPerSec().toFixed(2), rec: Rec.on ? Rec.sid : undefined, heard: Rec.on ? (ModelMic.judgingText || '').slice(0, 120) : undefined });
       }
       else if (e.type === 'moveOn') {
         toast((e.continued ? 'Carrying on. ' : e.auto ? 'Moving on after 3 tries. ' : 'Moving on. ') + M.disp[e.pos] + ' is marked for review.', 3200);
@@ -848,7 +848,7 @@
     }
     postMessage(m) {
       if (m.type !== 'run') return; // the server has its own model
-      if (m.kind === 'verify' || m.seg < 0) { this.send({ t: 'full', kind: m.kind, seg: m.seg, windows: m.windows }, m.audio); return; }
+      if (m.kind === 'verify' || m.seg < 0) { this.send({ t: 'full', id: m.id, kind: m.kind, seg: m.seg, windows: m.windows }, m.audio); return; }
       const done = this.sent.get(m.seg) || 0;
       if (m.audio.length > done) { this.send({ t: 'chunk', seg: m.seg }, m.audio.subarray(done)); this.sent.set(m.seg, m.audio.length); }
       while (this.sent.size > 8) this.sent.delete(this.sent.keys().next().value);
@@ -864,27 +864,34 @@
   }
   // Where the speech server is: ?asr=wss://… (remembered; ?asr=off to stop), else the site's own server when
   // the page is served by one (it answers /health), else none (the model runs in the browser).
-  let asrServer = null, reportTo = null;
+  let asrServer = null, reportTo = null, serverFixed = false;
+  // A server announced on this site: a computer running Sabaq's server (server/start-public.js) publishes its
+  // current public address in asr-url.json. That address changes whenever the computer's tunnel is renewed (after it
+  // slept, for one), so it is looked up again whenever the server can't be reached, not only when the page opens.
+  // Used only if the server answers. (A query that changes every time: GitHub Pages' cache could otherwise hand out
+  // an address up to 10 minutes old.)
+  async function lookUpServer(timeout) {
+    const a = await fetch('asr-url.json?t=' + Date.now(), { cache: 'no-store' }).then(x => (x.ok ? x.json() : null)).catch(() => null);
+    if (!a || !/^https:\/\//.test(a.url || '')) return null;
+    const base = a.url.replace(/\/+$/, ''), ctl = new AbortController(), t = setTimeout(() => ctl.abort(), timeout);
+    reportTo = base;
+    const h = await fetch(base + '/health', { cache: 'no-store', mode: 'cors', signal: ctl.signal }).then(x => (x.ok ? x.json() : null)).catch(() => null);
+    clearTimeout(t);
+    return h && h.ready ? base.replace(/^https/, 'wss') + '/asr' : null;
+  }
   async function findServer() {
     try {
       const q = new URLSearchParams(location.search).get('asr');
       if (q) store.set('asrServer', q === 'off' ? '' : q);
       const saved = store.get('asrServer', null);
-      if (saved !== null) { asrServer = saved || null; return; }
-      if (IN_CLAUDE) return;
+      if (saved !== null) { asrServer = saved || null; serverFixed = true; return; }
+      if (IN_CLAUDE) { serverFixed = true; return; }
       const r = await fetch('health', { cache: 'no-store' }).catch(() => null);
-      if (r && r.ok && /json/.test(r.headers.get('content-type') || '')) { asrServer = location.origin.replace(/^http/, 'ws') + location.pathname.replace(/[^/]*$/, '') + 'asr'; return; }
-      // A server announced on this site: a computer running Sabaq's server (server/start-public.js) publishes its
-      // current public address in asr-url.json. Used only if it answers now; otherwise the in-browser model.
-      // (a query that changes every time: GitHub Pages' cache could otherwise hand out an address up to 10 minutes old)
-      const a = await fetch('asr-url.json?t=' + Date.now(), { cache: 'no-store' }).then(x => (x.ok ? x.json() : null)).catch(() => null);
-      if (a && /^https:\/\//.test(a.url || '')) {
-        const base = a.url.replace(/\/+$/, ''), ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 4000);
-        reportTo = base;
-        const h = await fetch(base + '/health', { cache: 'no-store', mode: 'cors', signal: ctl.signal }).then(x => (x.ok ? x.json() : null)).catch(() => null);
-        clearTimeout(t);
-        if (h && h.ready) asrServer = base.replace(/^https/, 'wss') + '/asr';
-      }
+      if (r && r.ok && /json/.test(r.headers.get('content-type') || '')) { asrServer = location.origin.replace(/^http/, 'ws') + location.pathname.replace(/[^/]*$/, '') + 'asr'; serverFixed = true; return; }
+      // (a phone on a slow network can miss the first answer: one more try before settling for the slower in-browser
+      // model, which then keeps looking: see probeForServer)
+      const u = (await lookUpServer(5000)) || (await lookUpServer(7000));
+      if (u) asrServer = u;
     } catch (e) { /* no server here */ }
   }
   const asrServerReady = findServer();
@@ -901,6 +908,34 @@
       const url = base.replace(/\/+$/, '') + '/report';
       if (!(navigator.sendBeacon && navigator.sendBeacon(url, new Blob([body], { type: 'text/plain' })))) fetch(url, { method: 'POST', body, mode: 'cors', keepalive: true }).catch(() => {});
     } catch (e) { /* best effort */ }
+  }
+  // Recording for testing, only when asked for with ?record=1 (remembered; ?record=0 ends it): what the microphone
+  // hears (16 kHz, as the speech model gets it) goes to the Sabaq speech server this page uses, in 5 s pieces, so a
+  // session can be replayed through the app to find what went wrong. The server keeps it only if it was started with
+  // RECORD=1. The screen says so while it records.
+  const Rec = {
+    on: (() => { const q = new URLSearchParams(location.search).get('record'); if (q === '1' || q === '0') store.set('record', q === '1'); return !!store.get('record', false); })(),
+    sid: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), i: 0, t0: 0, parts: [], len: 0,
+    add(f) {
+      if (!this.on || !asrServer) return;
+      if (!this.len) this.t0 = performance.now();
+      const s = new Int16Array(f.length); for (let i = 0; i < f.length; i++) { const v = f[i]; s[i] = v >= 1 ? 32767 : v <= -1 ? -32768 : v * 32767; }
+      this.parts.push(s); this.len += s.length;
+      if (this.len >= 16000 * 5) this.flush();
+    },
+    flush() {
+      if (!this.len || !asrServer) { this.parts = []; this.len = 0; return; }
+      const a = new Int16Array(this.len); let o = 0; for (const p of this.parts) { a.set(p, o); o += p.length; }
+      this.parts = []; this.len = 0;
+      const base = asrServer.replace(/^ws/, 'http').replace(/\/asr$/, '');
+      fetch(base + '/record?sid=' + this.sid + '&i=' + this.i++ + '&t=' + Math.round(this.t0), { method: 'POST', body: a.buffer, mode: 'cors', headers: { 'content-type': 'text/plain' } }).catch(() => {});
+    },
+  };
+  if (Rec.on) {
+    const b = document.createElement('div');
+    b.textContent = '● Recording for testing (open with ?record=0 to stop)';
+    b.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(6px + env(safe-area-inset-bottom,0px));z-index:50;font:600 11px/1.4 system-ui,sans-serif;padding:3px 9px;border-radius:9px;background:#b3261e;color:#fff;pointer-events:none;opacity:.85';
+    document.body.appendChild(b);
   }
   window.addEventListener('error', e => report('error', { msg: String(e.message).slice(0, 200), at: (e.filename || '').split('/').pop() + ':' + e.lineno }));
   window.addEventListener('unhandledrejection', e => report('error', { msg: String(e.reason && (e.reason.message || e.reason)).slice(0, 200) }));
@@ -931,6 +966,7 @@
         return;
       }
       this.remote = false;
+      this.probeForServer();
       this.worker = new Worker('asr-worker.js', { type: 'module' });
       this.worker.onmessage = e => this.onMessage(e.data);
       this.worker.onerror = () => {
@@ -953,7 +989,8 @@
     lost(wasOpen) {
       this.worker = null; this.ready = false; this.busy = false; this.busyKind = ''; this.busyP = this.busyF = false; this.inflightP = 0;
       this.streamSeg = -1; this.unsent = []; this.unsentLen = 0; this.lastLive = { seg: -1, len: 0 };
-      if (this.verifyWait) { const f = this.verifyWait; this.verifyWait = null; f(null); }
+      if (this.verifyWait) { const w = this.verifyWait; this.verifyWait = null; w.f(null); }
+      this.finals = this.finals.filter(j => j.seg >= 0); // (a check nobody waits for any more must not be sent later)
       if (this.inflightF && this.inflightF.seg >= 0) this.finals.unshift(this.inflightF);
       this.inflightF = null;
       this.retries = (this.retries || 0) + 1;
@@ -962,24 +999,44 @@
         this.remote = true;
         if (this.retries === 1 && wasOpen) toast('Reconnecting to Sabaq\'s speech server…', 3000);
         clearTimeout(this.retryTimer);
-        this.retryTimer = setTimeout(() => { if (!this.worker) this.init(); }, waits[this.retries - 1]);
+        // (from the second try on, ask the site where the server is now: its address may have changed)
+        this.retryTimer = setTimeout(async () => {
+          if (!serverFixed && this.retries >= 2) { const u = await lookUpServer(4000); if (u) asrServer = u; }
+          if (!this.worker) this.init();
+        }, waits[this.retries - 1]);
         renderStatus(); return;
       }
       this.retries = 0; this.remote = false; this.pendingFinal.clear();
       report('server-lost', { server: asrServer });
       toast('Can\'t reach Sabaq\'s speech server. Using the slower model on this phone for now; Sabaq switches back when the server returns.', 7000);
       this.init(true); renderStatus();
+    },
+    // On the slower in-browser model: look for the speech server every 15 s (at its address, or at the one the site
+    // publishes now) and switch to it between phrases.
+    probeForServer() {
       clearInterval(this.probeTimer);
+      if (serverFixed && !asrServer) return; // (?asr=off, or the claude.ai demo)
+      let probing = false;
       this.probeTimer = setInterval(async () => {
-        if (this.remote || !asrServer) { clearInterval(this.probeTimer); return; }
-        if (this.inSpeech || this.busy || this.finals.length) return;   // (not in the middle of a phrase)
-        const base = asrServer.replace(/^ws/, 'http').replace(/\/asr$/, '');
-        const h = await fetch(base + '/health', { cache: 'no-store', mode: 'cors' }).then(x => (x.ok ? x.json() : null)).catch(() => null);
-        if (!h || !h.ready || this.remote || this.inSpeech || this.busy) return;
-        clearInterval(this.probeTimer);
-        try { this.worker && this.worker.terminate(); } catch (e) { /* gone */ }
-        this.worker = null; this.ready = false; this.init();
-        toast('Back on Sabaq\'s speech server.', 2500);
+        if (this.remote) { clearInterval(this.probeTimer); return; }
+        if (probing || this.inSpeech || this.busy || this.finals.length) return;   // (not in the middle of a phrase)
+        probing = true;
+        try {
+          let u = null;
+          if (asrServer) {
+            const base = asrServer.replace(/^ws/, 'http').replace(/\/asr$/, ''), ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 5000);
+            const h = await fetch(base + '/health', { cache: 'no-store', mode: 'cors', signal: ctl.signal }).then(x => (x.ok ? x.json() : null)).catch(() => null);
+            clearTimeout(t); if (h && h.ready) u = asrServer;
+          }
+          if (!u && !serverFixed) u = await lookUpServer(5000);
+          if (!u || this.remote || this.inSpeech || this.busy || this.finals.length) return;
+          asrServer = u;
+          clearInterval(this.probeTimer);
+          try { this.worker && this.worker.terminate(); } catch (e) { /* gone */ }
+          this.worker = null; this.ready = false; this.init();
+          toast('Connected to Sabaq\'s speech server.', 2500);
+          report('server-back', { server: asrServer });
+        } finally { probing = false; }
       }, 15000);
     },
     onMessage(m) {
@@ -1012,8 +1069,11 @@
         if (m.kind === 'partial' && m.cap != null) { const rx = performance.now(); d = { seg: m.seg, rx, e2e: rx - m.cap, wait: m.wait, ms: m.ms, net: rx - m.cap - (m.wait || 0) - (m.ms || 0) }; }
         if (window.__asrLog) window.__asrLog.push({ kind: m.kind, seg: m.seg, ms: m.ms, secs: m.secs, at: performance.now(), text: m.text + (m.gap != null ? '  (gap ' + m.gap.toFixed(2) + ')' : '') }); // dev-only test log
         if (m.kind === 'final') this.chain = this.chain.then(() => this.judge(m.text, m.seg)).catch(() => {});
-        else if (m.kind === 'verify' || m.kind === 'verifyc') { const f = this.verifyWait; this.verifyWait = null; if (f) f(m.text); }
-        else if (m.kind === 'score') { const f = this.verifyWait; this.verifyWait = null; if (f) f(m.error ? null : m.costs); }
+        // (a check's answer goes only to the check that asked: one given up on (timed out) is ignored when it comes)
+        else if (m.kind === 'verify' || m.kind === 'verifyc' || m.kind === 'score') {
+          const w = this.verifyWait;
+          if (w && (m.id == null || m.id === w.id)) { this.verifyWait = null; w.f(m.kind === 'score' ? (m.error ? null : m.costs) : m.text); }
+        }
         else {
           const whole = m.whole != null ? !!m.whole : this.partialWhole, gap = m.gap;
           // (two lanes: the earlier phrase may not be judged yet, or is being double-checked; its words come
@@ -1141,6 +1201,7 @@
     },
     stop() {
       if (this.inSpeech) this.endSegment();
+      Rec.flush();
       this.on = false;
       clearTimeout(this.watch);
       this.unhook();
@@ -1174,6 +1235,7 @@
     },
     // voice activity: a phrase starts on 60 ms of sound above the noise floor and ends after 650 ms of quiet
     onFrame(f) {
+      Rec.add(f);
       if (Qari.gated()) {
         // the qari is speaking: drop what the mic hears (and forget words of the dropped phrase already used)
         if (this.inSpeech || this.len) phraseSkip = 0;
@@ -1409,7 +1471,12 @@
         if (costs && costs.length === 5) {
           const short = full.length <= 2;
           const fit = Math.min(costs[0], costs[1], short ? costs[4] : Infinity), slip = Math.min(costs[2], costs[3], short ? costs[4] : Infinity), ms = Math.round(performance.now() - t0);
-          const decided = fit <= SCORE_FIT ? 'fits' : slip >= SCORE_SLIP ? 'slip' : 'unsure';
+          // (a slip only where this phrase's reading heard a neighbour of the word: then the word belongs in this audio.
+          // Otherwise it may have been said in an earlier phrase (a cough between, a long madd): the checks below,
+          // which can go back to earlier phrases, decide)
+          const near = x => x >= 0 && x < M.N && full.some(w => E.sim(w, M.keys[x]) >= 0.84);
+          const anchored = short || near(p - 1) || near(p + 1);
+          const decided = fit <= SCORE_FIT ? 'fits' : slip >= SCORE_SLIP && anchored ? 'slip' : 'unsure';
           if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'word check at ' + M.disp[p] + ': fit ' + fit + ' slip ' + slip + ' -> ' + decided + ' (' + ms + ' ms)' }); // dev-only
           report('check', { word: M.disp[p], at: where(p), fit, slip, decided, ms, wps: +wordsPerSec().toFixed(2) });
           if (decided === 'slip') {
@@ -1422,7 +1489,8 @@
             try { commit(text, true, true); T.flush(); } finally { T.strict = strict; }
             // (the words of the run that fit were said: whatever the reading made of them)
             const [a, b] = costs[0] === fit ? R[0] : costs[1] === fit ? R[1] : R[4];
-            for (let x = a; x <= b; x++) if (T.state[x] !== CORRECT && T.state[x] !== PENDING && (x >= p || T.state[x] !== UNCLEAR)) T._mark(x, CORRECT);
+            // (only from the suspected word on: an earlier word keeps the verdict it already had)
+            for (let x = Math.max(a, p); x <= b; x++) if (T.state[x] !== CORRECT && T.state[x] !== PENDING) T._mark(x, CORRECT);
             handleEvents(); render();
             return;
           }
@@ -1442,6 +1510,16 @@
         if (window.__asrLog) window.__asrLog.push({ kind: 'verify', seg, text: a, at: performance.now() }); // dev-only test log
         return a;
       };
+      // A breath in the middle of a word cuts the phrase there: its last word is then only part of the right one
+      // ("حيم" for عليم, finished in the next phrase). A near word at the very end of a phrase is not judged now: it
+      // waits for what comes next. If the reciter carries on, the next phrase has the word; if they stay quiet, the
+      // end-of-phrase check judges it after a short silence, as before.
+      { const last = full[full.length - 1];
+        if (st1.state === CLOSE && last && T.stopped < 0 && E.sim(last, M.keys[st1.pos]) >= 0.5 && E.sim(last, M.keys[st1.pos]) < 0.84 && !full.slice(0, -1).some(w => E.sim(w, M.keys[st1.pos]) >= 0.5)) {
+          if (window.__asrLog) window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'near word at the end of the phrase (' + last + ' for ' + M.disp[st1.pos] + '): waiting for the next phrase' }); // dev-only
+          commit(text, true, true);
+          return;
+        } }
       let altRest = null;
       // The suspected word may belong to the PREVIOUS phrase: fast recitation cuts phrases between any two words, so
       // a word can end up alone in a 0.3 s phrase and be misheard there, and the tracker only judges a word once it
@@ -1542,14 +1620,17 @@
     },
     verify(audioSeg, before, kind = 'verify', windows) {
       return new Promise(res => {
-        const lead = before ? before.length : 8000;
-        const pad = new Float32Array(lead + audioSeg.length + 4800);
+        // (Whisper gets half a second of silence in front when there is no context; the word check gets the audio as
+        // it is: the fast model never hears digital silence, and its scores were measured on plain recitation)
+        const lead = before ? before.length : kind === 'score' ? 0 : 8000, tail = kind === 'score' ? 0 : 4800;
+        const pad = new Float32Array(lead + audioSeg.length + tail);
         if (before) pad.set(before, 0);
         pad.set(audioSeg, lead);
-        const timer = setTimeout(() => { if (this.verifyWait === done) this.verifyWait = null; res(null); }, 25000);
+        const id = this.jobId = (this.jobId || 0) + 1;
+        const timer = setTimeout(() => { if (this.verifyWait && this.verifyWait.id === id) this.verifyWait = null; this.finals = this.finals.filter(j => j.id !== id); res(null); }, 25000);
         const done = t => { clearTimeout(timer); res(t); };
-        this.verifyWait = done;
-        this.finals.unshift({ kind, seg: -1, audio: pad, windows }); // before any later phrase
+        this.verifyWait = { id, f: done };
+        this.finals.unshift({ kind, seg: -1, id, audio: pad, windows }); // before any later phrase
         this.pump();
       });
     },
@@ -1562,7 +1643,7 @@
         // the server reads a final reading and a live reading side by side
         if (!this.busyF && this.finals.length) {
           const job = this.finals.shift(); this.busyF = true; this.busyKind = job.kind; this.inflightF = job; renderStatus();
-          this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio, windows: job.windows });
+          this.worker.postMessage({ type: 'run', id: job.id, kind: job.kind, seg: job.seg, audio: job.audio, windows: job.windows });
         }
         if (!this.busyP && this.partial) {
           const job = this.partial; this.partial = null; this.partialWhole = !!job.whole;
@@ -1578,7 +1659,7 @@
       if (!job) return;
       this.busy = true; this.busyKind = job.kind;
       if (job.kind !== 'partial') { renderStatus(); if (this.remote) this.inflightF = job; }
-      this.worker.postMessage({ type: 'run', kind: job.kind, seg: job.seg, audio: job.audio }, [job.audio.buffer]);
+      this.worker.postMessage({ type: 'run', id: job.id, kind: job.kind, seg: job.seg, audio: job.audio, windows: job.windows }, [job.audio.buffer]);
     },
   };
 

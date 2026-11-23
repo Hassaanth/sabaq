@@ -145,6 +145,9 @@
       }
       const keySet = new Set(keys);
       this.keySet = keySet;
+      // ayah starts by their first word (ayahs that open alike: تبارك الذي, يا ايها الذين امنوا ...)
+      this.byFirst = new Map();
+      for (let p = 0; p < keys.length; p++) if (ayahStart[p]) { const l = this.byFirst.get(keys[p]); if (l) l.push(p); else this.byFirst.set(keys[p], [p]); }
       this.hesitation = new Set(HESITATION.filter(h => !keySet.has(h)));
       // inverted index on the alif-insensitive skeleton
       this.index = new Map();
@@ -428,6 +431,7 @@
     _decide(r, final) {
       const m = this.m, q = this.q, c = this.c;
       const avail = q.length - r;
+      { const so = this._sharedOpening(c, r, final); if (so === 'wait') return 'wait'; if (so) return true; }
       // Stopped here, the qari has already said the word, and the reciter carries on with the words that
       // follow it (three in a row, after at most two stray words still on their way): let them. The word
       // stays marked for review. A stop (even a false one, from a misheard word) can then never trap them.
@@ -626,6 +630,46 @@
 
     /* Returns true if the reciter is now stopped at p; false if, after 3 wrong tries at the same word,
        they are let through (the word stays marked for review). */
+    // Ayahs that open with the same words (تبارك الذي: 25:1, 25:10, 25:61, 67:1; يا ايها الذين امنوا ...): the reciter was
+    // placed in one of them from its first words (the open surah's, or the first found); the words that follow show
+    // which one they are reciting. Moving there is no mistake, in the same surah or another. Only within an ayah's
+    // first 4 words, when those were heard as the text has them, and when the next two words heard fit the other ayah
+    // and not this one. (Stopped on the word where the two part, from an earlier try: the stop is undone.) Not when
+    // the reciter got to this ayah by reciting the one before it: then the place is certain, and going on with the
+    // other ayah's words is a slip between similar ayahs (mutashabihat), judged as before.
+    _sharedOpening(c, r, final) {
+      const m = this.m, q = this.q;
+      if (c <= 0 || c >= m.N || m.ayahStart[c] || r >= q.length) return false;
+      if (this.stopped >= 0 && this.stopped !== c) return false;
+      let s = c; while (s > 0 && !m.ayahStart[s]) s--;
+      const k = c - s;
+      if (k < 1 || k > 4 || sim(q[r], m.keys[c]) >= STRONG) return false;
+      for (let x = s; x < c; x++) if (this.state[x] !== CORRECT) return false;
+      if (s > 0 && this.state[s - 1] !== PENDING) return false;
+      const starts = m.byFirst.get(m.keys[s]);
+      if (!starts || starts.length < 2) return false;
+      let best = -1, bs = 0, need = false;
+      for (const A of starts) {
+        if (A === s || A + k + 1 >= m.N) continue;
+        let same = true; for (let i = 1; i < k; i++) if (m.keys[A + i] !== m.keys[s + i]) { same = false; break; }
+        if (!same || m.ayahStart[A + k]) continue;
+        const s1 = sim(q[r], m.keys[A + k]); if (s1 < STRONG) continue;
+        let sc = s1;
+        if (r + 1 < q.length) { const s2 = sim(q[r + 1], m.keys[A + k + 1]); if (s2 < STRONG) continue; sc += s2; }
+        else if (!final) { need = true; continue; }
+        // (alike: the open surah's, then the nearest)
+        if (this.hint && A >= this.hint[0] && A < this.hint[1]) sc += 0.01;
+        sc -= Math.abs(A - s) * 1e-9;
+        if (sc > bs) { bs = sc; best = A; }
+      }
+      if (best < 0) return need ? 'wait' : false;
+      for (let x = s; x <= c; x++) { this.state[x] = PENDING; this.heard.delete(x); this.fixed.delete(x); this.flagged.delete(x); }
+      if (this.stopped === c) { this.stopped = -1; this.attempts = 0; this.letContinue = false; }
+      for (let i = 0; i < k; i++) this._mark(best + i, CORRECT);
+      this.c = best + k; this.lost.length = 0;
+      this.events.push({ type: 'relocated', pos: best, from: s, opening: true });
+      return true;
+    }
     _stop(p, attempt) {
       const again = this.stopped === p;
       if (!again) { this.attempts = 0; this.letContinue = false; this.stopWord = this.heard.has(p) ? this.heard.get(p).replace(/ /g, '') : null; this.stopQ = this.qi; }

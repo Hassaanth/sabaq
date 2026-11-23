@@ -57,6 +57,9 @@ env.cacheDir = process.env.HF_CACHE || path.join(os.tmpdir(), 'sabaq-hf-cache');
 const NOT_QURAN = new Set(['نهاية', 'الدرس']);
 const CORES = os.cpus().length;
 const THREADS = +process.env.THREADS || Math.max(1, Math.min(4, CORES >> 1 || 1));
+// (the live readings get more: they are what the highlight waits for. 8 threads read 6.6 s of audio in 117 ms, 4 in
+// 143 ms, on a 12-core PC; Whisper's double-checks keep their own THREADS)
+const FAST_THREADS = +process.env.FAST_THREADS || Math.max(THREADS, Math.min(8, CORES - THREADS));
 
 // ---- NVIDIA Arabic FastConformer (CTC), via sherpa-onnx. The files live in server/models/pc (CTC_DIR to choose):
 // model.int8.onnx and tokens.txt, built by build-ctc-model.py from NVIDIA's own checkpoint (see the README). If
@@ -83,7 +86,7 @@ async function loadCtc() {
   const sherpa = require('sherpa-onnx-node');
   const rec = new sherpa.OfflineRecognizer({
     featConfig: { sampleRate: 16000, featureDim: 80 },
-    modelConfig: { nemoCtc: { model: path.join(CTC_DIR, 'model.int8.onnx') }, tokens: path.join(CTC_DIR, 'tokens.txt'), numThreads: THREADS, provider: 'cpu', debug: 0 },
+    modelConfig: { nemoCtc: { model: path.join(CTC_DIR, 'model.int8.onnx') }, tokens: path.join(CTC_DIR, 'tokens.txt'), numThreads: FAST_THREADS, provider: 'cpu', debug: 0 },
     decodingMethod: 'greedy_search',
   });
   // (with how long ago the last letter was heard: 0.3 s later with no new letter, the last word is finished,
@@ -116,7 +119,7 @@ const loading = (async () => {
   if (ctc) { read$.fast = ctc; read$.slow = whisper; LANES = 2; NAMES = { live: 'fastconformer-ctc', final: 'fastconformer-ctc', verify: 'whisper-base' }; if (scorer) NAMES.score = 'fastconformer-ctc'; }
   else { read$.fast = await loadWhisper(FALLBACK_LIVE); read$.slow = whisper; LANES = 1; NAMES = { live: 'whisper-tiny', final: 'whisper-base', verify: 'whisper-base' }; }
   const t = Date.now(); await read$.fast(new Float32Array(16000)); warm = Date.now() - t;
-  console.log(`models ready in ${((Date.now() - t0) / 1000).toFixed(1)} s: ${JSON.stringify(NAMES)}, ${THREADS} threads; a live reading costs ~${warm} ms`);
+  console.log(`models ready in ${((Date.now() - t0) / 1000).toFixed(1)} s: ${JSON.stringify(NAMES)}, ${FAST_THREADS}/${THREADS} threads; a live reading costs ~${warm} ms`);
 })();
 // which model reads which kind of job
 const modelFor = kind => (NAMES.live === 'fastconformer-ctc' ? (kind === 'verify' ? read$.slow : read$.fast) : (kind === 'partial' ? read$.fast : read$.slow));
@@ -151,7 +154,7 @@ function pump() {
 }
 // The newest audio of a streamed phrase, if 80 ms more of it arrived since its last reading (or a pause began:
 // its last word is then complete), with the faint noise after it (see below)
-const LIVE_WIN = Math.round(16000 * (+process.env.LIVE_WIN || 6)), LIVE_FROM = Math.round(16000 * (+process.env.LIVE_FROM || 9));
+const LIVE_WIN = Math.round(16000 * (+process.env.LIVE_WIN || 5)), LIVE_FROM = Math.round(16000 * (+process.env.LIVE_FROM || 7));
 function liveJob() {
   for (const ws of lives) {
     const L = ws.live;
@@ -163,7 +166,8 @@ function liveJob() {
     // (83 ms between readings at its start, 365 ms 15 s in), and the highlight falls behind a reciter who recites two
     // ayahs in one breath. The page finds where these words join the ones it already has. The phrase's final
     // reading still reads all of it.)
-    const from = s.len > LIVE_FROM ? s.len - LIVE_WIN : 0, n = s.len - from;
+    const from = s.len > LIVE_FROM && !L.full ? s.len - LIVE_WIN : 0, n = s.len - from;
+    L.full = false;
     const audio = new Float32Array(n + PAD); let o = 0, skip = from;
     for (const p of s.parts) { if (skip >= p.length) { skip -= p.length; continue; } const part = p.subarray(skip); skip = 0; audio.set(part, o); o += part.length; }
     audio.set(NOISE, n);
@@ -313,6 +317,7 @@ wss.on('connection', (ws, req) => {
       if (head.live && LANES >= 2) {
         if (!ws.live || ws.live.seg !== head.seg) { if (ws.live && head.seg < ws.live.seg) return; ws.live = { seg: head.seg, done: 0, whole: false, doneWhole: false, win: ws.live && ws.live.win }; }
         ws.live.whole = !!head.whole;
+        if (head.full) ws.live.full = true; // (the page couldn't place a reading of the phrase's end: read all of it once)
         // (the words expected next, for following the reciter frame by frame: see ctc-score.js track)
         const W = head.win;
         if (W && Array.isArray(W.words) && W.words.length && W.words.length <= 40 && W.words.every(x => typeof x === 'string' && x.length <= 40) && Number.isInteger(W.base)) ws.live.win = { base: W.base, words: W.words };

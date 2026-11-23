@@ -914,8 +914,9 @@
       this.send({ t: 'run', kind: m.kind, seg: m.seg, len: m.audio.length, whole: !!m.whole, cap: m.cap });
     }
     // streaming: more audio of the phrase being recited (the server reads it as it comes)
-    sendChunk(seg, pcm, whole, cap, win) {
-      this.send(win ? { t: 'chunk', seg, live: 1, whole: !!whole, cap, win } : { t: 'chunk', seg, live: 1, whole: !!whole, cap }, pcm);
+    sendChunk(seg, pcm, whole, cap, win, full) {
+      const h = { t: 'chunk', seg, live: 1, whole: !!whole, cap }; if (win) h.win = win; if (full) h.full = 1;
+      this.send(h, pcm);
       this.sent.set(seg, (this.sent.get(seg) || 0) + pcm.length);
       while (this.sent.size > 8) this.sent.delete(this.sent.keys().next().value);
     }
@@ -1353,7 +1354,8 @@
           let win = null;
           const wb = this.canTrack && T.c >= 0 && lastCursor >= 0 && lastCursor < M.N && T.stopped < 0 ? Math.max(0, lastCursor - 2) : -1;
           if (wb >= 0 && (wb !== this.winBase || this.winSeg !== this.seg)) { this.winBase = wb; this.winSeg = this.seg; win = { base: wb, words: M.keys.slice(wb, wb + 20) }; }
-          this.worker.sendChunk(this.seg, out, this.silence >= 100, Math.round(performance.now()), win);
+          const full = this.wantFull === this.seg; if (full) this.wantFull = -1;
+          this.worker.sendChunk(this.seg, out, this.silence >= 100, Math.round(performance.now()), win, full);
         }
       }
       if (this.silence >= 650) { this.endSegment(); return; }
@@ -1419,9 +1421,11 @@
       let joinAt = -1;
       if (skip) {
         const n = A.locked.length, need = Math.min(2, n);
-        if (!n) return;
+        // (nothing to join to: a long pause inside the phrase left the words already locked in out of those 5 s. The
+        // server is asked to read the whole phrase once more)
+        if (!n) { this.wantFull = seg; return; }
         for (let j = words.length; j >= need && joinAt < 0; j--) { let sc = 0; for (let k = 1; k <= need; k++) { const a = words[j - k], b = A.locked[n - k]; if (a === b || E.sim(a, b) >= 0.7) sc++; else break; } if (sc === need) joinAt = j; }
-        if (joinAt < 0) return;
+        if (joinAt < 0) { this.wantFull = seg; return; }
       } else A.prev = words;
       this.tailNow = tail ? { seg, w: tail, at: performance.now(), n: this.tailNow && this.tailNow.seg === seg && this.tailNow.w === tail ? this.tailNow.n + 1 : 1 } : null;
       // Readings of the same phrase don't always start alike (one may add or drop a garbled first word), so

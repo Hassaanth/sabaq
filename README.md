@@ -193,7 +193,7 @@ following in music) and what was measured here, on Al-Mulk 1–5, phone CPU emul
   0.15 s early (10 without it), some by 0.9 s, and the pace estimate wasn't steady enough to tell slow from normal.
 - **Long breaths stay quick.** Live readings re-read the phrase from its start, so they slowed as a phrase grew (83 ms
   apart at its start, 365 ms 15 s in): a reciter who joins two ayahs in one breath saw the highlight fall behind. Past
-  9 s, a live reading now covers the phrase's last 6 s (`LIVE_WIN`, `LIVE_FROM`); the page places it where it joins
+  7 s, a live reading now covers the phrase's last 5 s (`LIVE_WIN`, `LIVE_FROM`); the page places it where it joins
   the words it already has. Rifai reciting ayahs 1–2 in one 20 s breath: a live reading every ~155 ms throughout. The
   phrase's final reading, which judges mistakes, still reads all of it.
 - **Tried, measured, left off: frame-by-frame following** (`TRACK=1`, `server/ctc-score.js` `track`). The server

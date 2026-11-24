@@ -522,6 +522,9 @@
     if (P) return true;
     if (Feed.pending.length) return true;
     if (Input.kind === 'model' && ModelMic.on && (ModelMic.inSpeech || ModelMic.busy || ModelMic.finals.length)) return true;
+    // (a phrase's final reading came back and is being judged, or its word check is on the way: the try is not
+    // over. Missing this, the qari could start right as a correct try was being accepted)
+    if (Input.kind === 'model' && ModelMic.on && (ModelMic.pendingFinal.size || ModelMic.judging != null || ModelMic.verifyWait)) return true;
     return false;
   }
 
@@ -659,16 +662,20 @@
     // (stopped, going back to correct is what the reciter was asked to do: those words lock in as they come)
     if (T.stopped >= 0 && C.events.some(e => e.type === 'restart') && !C.events.some(e => e.type === 'stop' || e.type === 'mistake' || e.type === 'relocated') && C.stats.extras === T.stats.extras && C.lost.length <= T.lost.length)
       return Math.max(0, words.length - (C.q.length - C.qi));
-    if (C.events.some(e => e.type === 'stop' || e.type === 'mistake' || e.type === 'relocated' || e.type === 'restart')) return 0;
+    // (moving to the ayah that opens like this one, as its next words show (تبارك الذي: 25:1, 25:61, 67:1), is not a
+    // mistake: those words lock in, and the opening words of the ayah left behind go back to unrecited)
+    const opening = C.events.find(e => e.type === 'relocated' && e.opening);
+    if (C.events.some(e => e.type === 'stop' || e.type === 'mistake' || (e.type === 'relocated' && !e.opening) || e.type === 'restart')) return 0;
     if (C.stats.extras > T.stats.extras) return 0;
     // (a word the tracker could not place, kept aside in case the reciter moved elsewhere, is not right either)
-    if (C.lost.length > T.lost.length || (T.c >= 0 && C.c < T.c)) return 0;
+    if (C.lost.length > T.lost.length || (T.c >= 0 && C.c < T.c && !opening)) return 0;
     const a = T.state, b = C.state;
     // (carrying on after a stop marks the words between "not clearly heard": that is fine to lock in)
     const carried = C.events.some(e => e.type === 'moveOn' && e.continued);
-    for (let p = 0; p < b.length; p++) if (b[p] !== a[p] && b[p] !== CORRECT && !(carried && b[p] === UNCLEAR)) return 0;
+    for (let p = 0; p < b.length; p++) if (b[p] !== a[p] && b[p] !== CORRECT && !(carried && b[p] === UNCLEAR) && !(opening && p >= opening.from && p < opening.from + 6)) return 0;
     // locked words must have moved the cursor on by as many words
     const ok = Math.max(0, words.length - (C.q.length - C.qi));
+    if (opening) return ok;
     return T.c >= 0 && C.c - T.c < ok ? Math.max(0, C.c - T.c) : ok;
   }
 
@@ -1416,17 +1423,37 @@
     // joins the words already locked in (at least two of them found in it), or not used
     live(text, seg, whole, gap, skip) {
       if (seg <= this.judgedSeg) return;
-      const all = E.tokenize(text), words = whole ? all : all.slice(0, -1), tail = whole ? null : all[all.length - 1] || null;
-      const A = this.agree.seg === seg ? this.agree : (this.agree = { seg, prev: [], done: 0, locked: [] });
+      const all = E.tokenize(text), tail = whole ? null : all[all.length - 1] || null;
+      let words = whole ? all : all.slice(0, -1);
+      const A = this.agree.seg === seg ? this.agree : (this.agree = { seg, prev: [], done: 0, locked: [], fulls: 0 });
       let joinAt = -1;
       if (skip) {
-        const n = A.locked.length, need = Math.min(2, n);
-        // (nothing to join to: a long pause inside the phrase left the words already locked in out of those 5 s. The
-        // server is asked to read the whole phrase once more)
-        if (!n) { this.wantFull = seg; return; }
-        for (let j = words.length; j >= need && joinAt < 0; j--) { let sc = 0; for (let k = 1; k <= need; k++) { const a = words[j - k], b = A.locked[n - k]; if (a === b || E.sim(a, b) >= 0.7) sc++; else break; } if (sc === need) joinAt = j; }
-        if (joinAt < 0) { this.wantFull = seg; return; }
-      } else A.prev = words;
+        // where the last two words of `base` are in this reading, or -1. Words can repeat within 5 s (a refrain, as in
+        // ar-Rahman): with `here`, the place after which the reading goes on with the word you are at wins.
+        const same = (a, b) => a === b || E.sim(a, b) >= 0.7;
+        const ends = (base, here) => {
+          const n = base.length; if (n < 2) return -1;
+          let last = -1;
+          for (let j = words.length; j >= 2; j--) {
+            if (!same(words[j - 1], base[n - 1]) || !same(words[j - 2], base[n - 2])) continue;
+            if (!here) return j;
+            if (last < 0) last = j;
+            if (j < words.length && T.c >= 0 && T.c < M.N && same(words[j], M.keys[T.c])) return j;
+          }
+          return last;
+        };
+        joinAt = ends(A.locked, true);
+        if (joinAt < 0) {
+          // (the words locked in are not in these 5 s (a long pause inside the phrase), or too few are locked in (the
+          // place not found yet, or a move the final reading will judge): the last whole reading of the phrase,
+          // joined to these words, gives the phrase so far)
+          const B = A.prev;
+          for (let i = B.length; i >= Math.max(2, B.length - 4); i--) { const j = ends(B.slice(0, i), false); if (j >= 0) { words = B.slice(0, i).concat(words.slice(j)); skip = 0; break; } }
+          // (not even that: the server is asked to read the whole phrase once, not again until that reading came back)
+          if (skip) { const key = A.locked.length + '/' + A.fulls; if (A.askedFull !== key) { A.askedFull = key; this.wantFull = seg; } return; }
+          A.prev = words;
+        }
+      } else { A.prev = words; A.fulls++; }
       this.tailNow = tail ? { seg, w: tail, at: performance.now(), n: this.tailNow && this.tailNow.seg === seg && this.tailNow.w === tail ? this.tailNow.n + 1 : 1 } : null;
       // Readings of the same phrase don't always start alike (one may add or drop a garbled first word), so
       // where the locked-in words end is found by matching them, never by counting.

@@ -306,6 +306,7 @@
       this.stopWord = null;   // what was heard when the reciter was stopped (null: the word was skipped)
       this.attempts = 0;      // wrong attempts at the stopped word
       this.noRewindBefore = 0; // words before this index in q have already been re-read once after locating
+      this.journal = [];      // recent marks, with what each word was before (to undo a move between alike ayahs)
     }
     clone() {
       const t = new Tracker.__Shell();
@@ -313,7 +314,7 @@
       t.c = this.c; t.q = this.q.slice(); t.qi = this.qi; t.lost = this.lost.slice();
       t.events = []; t.stats = Object.assign({}, this.stats); t.sawBismillah = this.sawBismillah;
       t.strict = this.strict; t.stopped = this.stopped; t.fixed = new Set(this.fixed); t.flagged = new Set(this.flagged);
-      t.heardCount = this.heardCount; t.stopHeard = this.stopHeard; t.stopWord = this.stopWord; t.attempts = this.attempts; t.noRewindBefore = this.noRewindBefore; t.letContinue = this.letContinue; t.hint = this.hint; t.stopQ = this.stopQ;
+      t.heardCount = this.heardCount; t.stopHeard = this.stopHeard; t.stopWord = this.stopWord; t.attempts = this.attempts; t.noRewindBefore = this.noRewindBefore; t.letContinue = this.letContinue; t.hint = this.hint; t.stopQ = this.stopQ; t.journal = this.journal.slice();
       return t;
     }
     setPosition(p) { this.c = p; this.lost = []; this.q = this.q.slice(this.qi); this.qi = 0; this.stopped = -1; this.noRewindBefore = 0; }
@@ -328,7 +329,7 @@
     reset() {
       this.state.fill(0); this.heard.clear(); this.q = []; this.qi = 0; this.lost = [];
       this.events = []; this.stats = { restarts: 0, selfCorrected: 0, fillers: 0, extras: 0 };
-      this.stopped = -1; this.fixed.clear(); this.flagged.clear();
+      this.stopped = -1; this.fixed.clear(); this.flagged.clear(); this.journal = [];
     }
     feed(words) {
       for (const w of words) { const n = norm(w); if (n && !this.m.hesitation.has(n)) { this.q.push(n); this.heardCount++; } }
@@ -351,6 +352,8 @@
     // ---- internals ----
     _mark(p, st, heard) {
       const prev = this.state[p];
+      this.journal.push({ p, st: prev, h: this.heard.get(p), fx: this.fixed.has(p), fl: this.flagged.has(p) });
+      if (this.journal.length > 64) this.journal.shift();
       // A word already recited correctly is never downgraded on a later pass by a soft judgement.
       if (prev === CORRECT && (st === CLOSE || st === UNCLEAR || st === MISSED)) return;
       if (st === CORRECT && (prev === WRONG || prev === MISSED || prev === CLOSE)) {
@@ -663,7 +666,18 @@
         if (sc > bs) { bs = sc; best = A; }
       }
       if (best < 0) return need ? 'wait' : false;
-      for (let x = s; x <= c; x++) { this.state[x] = PENDING; this.heard.delete(x); this.fixed.delete(x); this.flagged.delete(x); }
+      // Undo what this arrival marked on s..c, back to how each word was before it: marks from an earlier pass
+      // over this ayah stay. The arrival began with the last mark on the ayah's first word.
+      const J = this.journal; let from = -1;
+      for (let i = J.length - 1; i >= 0; i--) if (J[i].p === s) { from = i; break; }
+      for (let x = s; x <= c; x++) {
+        let e = null;
+        if (from >= 0) { for (let i = from; i < J.length; i++) if (J[i].p === x) { e = J[i]; break; } if (!e) continue; }
+        this.state[x] = e ? e.st : PENDING;
+        if (e && e.h != null) this.heard.set(x, e.h); else this.heard.delete(x);
+        if (e && e.fx) this.fixed.add(x); else this.fixed.delete(x);
+        if (e && e.fl) this.flagged.add(x); else this.flagged.delete(x);
+      }
       if (this.stopped === c) { this.stopped = -1; this.attempts = 0; this.letContinue = false; }
       for (let i = 0; i < k; i++) this._mark(best + i, CORRECT);
       this.c = best + k; this.lost.length = 0;

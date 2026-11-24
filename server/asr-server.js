@@ -166,7 +166,7 @@ function liveJob() {
     // (83 ms between readings at its start, 365 ms 15 s in), and the highlight falls behind a reciter who recites two
     // ayahs in one breath. The page finds where these words join the ones it already has. The phrase's final
     // reading still reads all of it.)
-    const from = s.len > LIVE_FROM && !L.full ? s.len - LIVE_WIN : 0, n = s.len - from;
+    const from = s.len > LIVE_FROM && !L.full ? Math.max(0, s.len - LIVE_WIN) : 0, n = s.len - from;
     L.full = false;
     const audio = new Float32Array(n + PAD); let o = 0, skip = from;
     for (const p of s.parts) { if (skip >= p.length) { skip -= p.length; continue; } const part = p.subarray(skip); skip = 0; audio.set(part, o); o += part.length; }

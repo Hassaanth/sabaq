@@ -710,11 +710,28 @@
     _relocate() {
       // Not placed yet, with a surah open (hint): starting it from the top is the usual case, and its first two
       // words, clearly heard, are enough. The highlight then starts on the third word, not three words late.
-      if (this.c < 0 && this.hint && this.lost.length === 2) {
-        const s0 = this.hint[0], q = this.q, L = this.lost;
-        if (s0 + 1 < this.hint[1] && sim(q[L[0]], this.m.keys[s0]) >= STRONG && sim(q[L[1]], this.m.keys[s0 + 1]) >= STRONG) {
-          this.c = s0; this.qi = L[0]; this.lost.length = 0; this.noRewindBefore = q.length;
-          this.events.push({ type: 'locked', pos: s0 });
+      // The same from two words in two more cases, so the first words recited are followed at once:
+      //  - they open exactly one ayah of the open surah (starting, or picking up, somewhere inside it);
+      //  - no ayah of the open surah opens with them, and exactly one surah of the Quran does (قل هو: Al-Ikhlas,
+      //    with any surah open): the reciter began another surah from its top.
+      // Two words that open several ayahs wait for the third word, as before. If the words that follow show another
+      // ayah with the same opening was meant, _sharedOpening moves there without a mistake.
+      // (also when the surah before was just finished: the highlight waits on the next surah's first word, and the
+      // reciter opens some other surah. Its first two words take them there, as a free move)
+      const fresh = this.c >= 0 && this.c < this.m.N && this.stopped < 0 && this.c === this.m.surahs[this.m.sOf[this.c]].start && this.state[this.c] === PENDING;
+      if ((this.c < 0 || fresh) && this.lost.length === 2) {
+        const m = this.m, q = this.q, L = this.lost;
+        const fits = p => p + 1 < m.N && sim(q[L[0]], m.keys[p]) >= STRONG && sim(q[L[1]], m.keys[p + 1]) >= STRONG;
+        let at = -1;
+        if (!fresh && this.hint && this.hint[0] + 1 < this.hint[1]) {
+          const s0 = this.hint[0];
+          if (fits(s0)) at = s0;
+          else { const starts = m.ayahPos[m.sOf[s0]].filter(fits); at = starts.length === 1 ? starts[0] : starts.length ? -2 : -1; }
+        }
+        if (at === -1) { const tops = m.surahs.map(su => su.start).filter(fits); if (tops.length === 1) at = tops[0]; }
+        if (at >= 0) {
+          this.c = at; this.qi = L[0]; this.lost.length = 0; this.noRewindBefore = q.length;
+          this.events.push({ type: fresh ? 'relocated' : 'locked', pos: at });
           return true;
         }
       }
@@ -737,11 +754,25 @@
         this._stop(this.c, false);
         return true;
       }
-      if (wasLocked && this.strict && this.stopped < 0 && this.m.sOf[target] !== this.m.sOf[this.c] && this.c - this.m.ayahPos[this.m.sOf[this.c]][this.m.aOf[this.c] - 1] >= 2 && !(this.c + 1 < this.m.N && this.m.ayahStart[this.c + 1])) {
-        this._mark(this.c, WRONG, this.q[this.lost[0]]);
-        this.lost.length = 0;
-        this._stop(this.c, true);
-        return true;
+      // Leaving the surah before it is finished, for another surah, is a mistake at the word where the reciter left
+      // (قل هو الله احد, then الم تر كيف: the word due was الله of 112:2). Teacher mode stops there; otherwise the word
+      // is marked and the reciter is followed to the new place. Not from a surah's first word (the surah before it was
+      // finished: going on to any surah is a free choice), and only where the place was certain: inside an ayah, or
+      // with the 4 words before this one recited.
+      if (wasLocked && this.stopped < 0 && this.c < this.m.N && this.m.sOf[target] !== this.m.sOf[this.c] && this.c !== this.m.surahs[this.m.sOf[this.c]].start) {
+        const m = this.m, c = this.c, inAyah = c - m.ayahPos[m.sOf[c]][m.aOf[c] - 1] >= 2 && !(c + 1 < m.N && m.ayahStart[c + 1]);
+        let said = 0; while (said < 4 && c - 1 - said >= 0 && m.sOf[c - 1 - said] === m.sOf[c] && this.state[c - 1 - said] !== PENDING) said++;
+        if (this.strict ? inAyah || said >= 4 : said >= 4) {
+          this._mark(c, WRONG, this.q[this.lost[0]]);
+          if (this.strict) {
+            this.lost.length = 0;
+            const n0 = this.events.length;
+            const stopped = this._stop(c, true);
+            for (let i = n0; i < this.events.length; i++) if (this.events[i].type === 'stop') this.events[i].to = target;
+            return stopped || true;
+          }
+          this.events.push({ type: 'veered', pos: c, to: target });
+        }
       }
       if (this.stopped >= 0) {
         // relocating while stopped (the reciter carried on elsewhere): the stop is over; the word stays marked

@@ -374,7 +374,14 @@
     }
     // Sabaq's own model: say when a phrase was heard and is still being read (slower phones)
     const reading = live && Input.kind === 'model' && (ModelMic.finals.length > 0 || ModelMic.busyKind === 'final' || ModelMic.busyKind === 'verify');
-    if (live && !locked) { st.dataset.live = 'finding'; tx.textContent = reading ? 'Heard you. Working out what you recited…' : 'Listening. Keep reciting and Sabaq will find where you are.'; return; }
+    if (live && !locked) {
+      st.dataset.live = 'finding';
+      // (the words heard so far are shown while the place is being found: the reciter sees at once they are heard)
+      const got = view.q.slice(-4).join(' ');
+      if (got) { const w = document.createElement('bdi'); w.className = 'stopword'; w.lang = 'ar'; w.dir = 'rtl'; w.textContent = got; tx.replaceChildren(document.createTextNode('Finding your place. Heard: '), w); }
+      else tx.textContent = reading ? 'Heard you. Working out what you recited…' : 'Listening. Start reciting and Sabaq will find where you are.';
+      return;
+    }
     if (live) { st.dataset.live = 'on'; tx.textContent = 'Following you · ' + where(Math.min(view.c, M.N - 1)) + (reading ? ' · reading…' : ''); return; }
     st.dataset.live = 'off';
     if (!locked) {
@@ -489,7 +496,7 @@
   // whole ayah and move on. An attempt still being heard or transcribed when the 3 s end is waited for.
   const Coach = {
     pos: -1, played: false, until: 0, timer: 0, started: 0,
-    stop(p, state) {
+    stop(p, state, to) {
       if (p !== this.pos || T.stopped !== p) { this.pos = p; this.played = false; this.until = 0; }
       if (this.until && Date.now() - this.started < 2500) return; // words still being said in the same breath, not a new try
       clearTimeout(this.timer);
@@ -499,7 +506,9 @@
       // the stop sound is not the reciter (browser recognition; Sabaq's own mic cancels its echo, and
       // muting it here would cut the reciter's phrase in half)
       Qari.soundUntil = Date.now() + 650;
-      toast(state === MISSED ? 'Stop. A word was skipped. Can you say it?'
+      // (went off into another surah before this one was finished: say where they went, and where they should be)
+      toast(to != null ? 'Stop. You went into ' + where(to) + '. You were in ' + where(p) + '.'
+        : state === MISSED ? 'Stop. A word was skipped. Can you say it?'
         : state === WRONG ? 'Stop. That word is not right. Can you say it?'
         : 'Stop. Not quite right. Say it again.', 3000);
       this.tick();
@@ -545,7 +554,7 @@
   const canVibrate = () => !!navigator.vibrate && (!navigator.userActivation || navigator.userActivation.hasBeenActive);
 
   // ---------------------------------------------------------------- toasts & events
-  let toastTimer = 0, lastRestartToast = 0;
+  let toastTimer = 0, lastRestartToast = 0, veeredAt = -1;
   function toast(msg, ms = 2600) {
     const t = $('toast');
     t.textContent = msg; t.dataset.show = '1';
@@ -556,11 +565,17 @@
     for (const e of T.drainEvents()) {
       if (e.type === 'restart' && Date.now() - lastRestartToast > 4000) { lastRestartToast = Date.now(); toast('Repeat noticed. Not counted as a mistake.'); }
       else if (e.type === 'locked') toast('Found you: ' + where(e.pos));
-      else if (e.type === 'relocated') toast('Moved to ' + where(e.pos));
+      else if (e.type === 'veered') { veeredAt = e.pos; if (canVibrate()) { try { navigator.vibrate(18); } catch (err) { /* not allowed */ } } }
+      else if (e.type === 'relocated') {
+        // (left a surah unfinished for another one: followed there, and the place they left is marked)
+        if (veeredAt >= 0) toast('Moved to ' + where(e.pos) + '. You left ' + where(veeredAt) + ' unfinished: marked there.', 4500);
+        else toast('Moved to ' + where(e.pos));
+        veeredAt = -1;
+      }
       else if (e.type === 'stop') {
         soundStop();
         if (canVibrate()) { try { navigator.vibrate([70, 50, 70]); } catch (err) { /* not allowed */ } }
-        Coach.stop(e.pos, e.state);
+        Coach.stop(e.pos, e.state, e.to);
         report('stop', { word: M.disp[e.pos], at: where(e.pos), state: e.state, wps: +wordsPerSec().toFixed(2), rec: Rec.on ? Rec.sid : undefined, heard: Rec.on ? (ModelMic.judgingText || '').slice(0, 120) : undefined });
       }
       else if (e.type === 'moveOn') {
@@ -1498,6 +1513,18 @@
         if (at >= 0 && A.cutFor !== at) { A.cutFor = at; this.cutNow = true; this.cutAt = performance.now(); }
         if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, at: performance.now(), text: '  suspect ' + (at >= 0 ? M.disp[at] : '-') + ' (before: ' + (A.suspect >= 0 ? M.disp[A.suspect] : '-') + ') rest=[' + rest.join(' ') + ']' + (this.cutNow ? ' CUT' : '') }); // dev-only
         A.suspect = at;
+        // Gone off into another surah: three or more words in a row that are found there, and not here. That is not
+        // one misheard word, so it does not wait for the phrase to end and a second reading: when three live
+        // readings in a row show it, the reciter is stopped now, at the word where they left.
+        const veer = at >= 0 ? (() => { const C = T.clone(); C.feed(rest); return C.events.find(e => e.type === 'stop' && e.to != null && e.pos === at); })() : null;
+        A.veerN = veer ? (A.veerAt === at ? A.veerN + 1 : 1) : 0; A.veerAt = veer ? at : -1;
+        if (veer && A.veerN >= 3) {
+          A.locked.push(...rest); A.done = A.locked.length; A.veerN = 0; this.cutNow = false; this.suspectAt = -1; P = null;
+          T.feed(rest);
+          if (window.__asrLog) window.__asrLog.push({ kind: 'live', seg, at: performance.now(), text: '  veer: stopped at ' + M.disp[at] + ' on [' + rest.join(' ') + ']' }); // dev-only
+          handleEvents(); render();
+          return;
+        }
         if (this.suspectAt !== at) { this.suspectAt = at; render(false); }
       }
       if (seg === this.seg && this.inSpeech && (words.length > n || tail)) preview(words.slice(n).join(' '), true, tail);
@@ -1571,6 +1598,12 @@
       if (window.__asrLog) { const st0 = stopsWith(text); window.__asrLog.push({ kind: 'judge', seg, at: performance.now(), text: 'rest=[' + text + '] done=' + this.agree.done + ' prev=[' + this.agree.prev.join(' ') + '] T.c=' + (T.c >= 0 ? M.disp[T.c] : '-') + ' pendingQ=' + T.q.slice(T.qi).join(' ') + (st0 ? ' STOP@' + M.disp[st0.pos] + ' st=' + st0.state : '') }); } // dev-only
       const st1 = T.strict && audioSeg ? stopsWith(text) : null;
       if (!st1) { commit(text, true, true); return; }
+      // (gone off into another surah: several words in a row found there. No single word to double-check: stop now)
+      if (st1.to != null) {
+        commit(text, true, true);
+        if (!P) { clearTimeout(idleTimer); T.flush(); handleEvents(); render(); }
+        return;
+      }
       // On the speech server, live readings come from a different (faster) model than this final reading: if one
       // of them already flagged this very word, two independent models agree. Stop now, without a third reading.
       if (this.remote && this.models && this.models.live !== this.models.final && this.agree.seg === seg && this.agree.cutFor === st1.pos) {

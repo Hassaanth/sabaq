@@ -324,7 +324,25 @@ console.log('Recite from anywhere (auto-detect)');
   check('restarting the ayah is still not a skip', r.t.stopped < 0, { stopped: r.t.stopped });
   const u = new E.Tracker(M); u.strict = true; u.setPosition(M.pos(67, 2));
   for (const x of [...a2, ...words(18, 1, 1)]) u.feed([x]);
-  check('moving to another surah is still a deliberate move', u.stopped < 0 && M.sOf[u.c] === 17, { stopped: u.stopped, s: M.sOf[u.c] });
+  check('leaving an unfinished surah for another one stops at the word that was due', u.stopped >= M.pos(67, 3) && u.stopped <= M.pos(67, 3) + 1 && u.state[u.stopped] === WRONG, { stopped: u.stopped - M.pos(67, 3), s: M.sOf[u.c] });
+  // the reciter's example: قل هو الله احد, then الم تر كيف فعل ربك (Al-Fil) instead of الله الصمد
+  const veer = (strict, open) => { const t = new E.Tracker(M); t.strict = strict; t.hint = [M.surahs[open - 1].start, M.surahs[open - 1].end]; const ev = []; for (const x of [...words(112, 1, 1), ...words(105, 1, 1)]) { t.feed([x]); ev.push(...t.drainEvents()); } t.flush(); ev.push(...t.drainEvents()); return { t, ev }; };
+  let v = veer(true, 112);
+  const stopEv = v.ev.find(e => e.type === 'stop');
+  check('Al-Ikhlas 112:1 then Al-Fil: stopped at 112:2, told where they went', v.t.stopped === M.pos(112, 2) && !!stopEv && M.sOf[stopEv.to] === 104 && !v.ev.some(e => e.type === 'relocated'), { stopped: v.t.stopped - M.pos(112, 2), to: stopEv && stopEv.to });
+  v = veer(true, 67);
+  check('...the same with another surah open on screen', v.t.stopped === M.pos(112, 2), { stopped: v.t.stopped - M.pos(112, 2), c: v.t.c });
+  v = veer(false, 112);
+  check('...without teacher mode: the word is marked, and they are followed to Al-Fil', v.t.state[M.pos(112, 2)] === WRONG && M.sOf[v.t.c - 1] === 104 && v.ev.some(e => e.type === 'veered'), { st: v.t.state[M.pos(112, 2)], s: M.sOf[Math.max(0, v.t.c - 1)] });
+  const fin = new E.Tracker(M); fin.strict = true; fin.hint = [M.surahs[111].start, M.surahs[111].end];
+  for (const x of [...words(112, 1, 4), ...words(105, 1, 1)]) fin.feed([x]); fin.flush();
+  check('a finished surah, then any other surah: a free move, no mistake', fin.stopped < 0 && M.sOf[fin.c - 1] === 104 && !fin.events.some(e => e.type === 'stop'), { stopped: fin.stopped, s: M.sOf[Math.max(0, fin.c - 1)] });
+  // the first two words are enough to be found: another surah from its top, or an ayah inside the open surah
+  const two = (open, ws) => { const t = new E.Tracker(M); t.hint = [M.surahs[open - 1].start, M.surahs[open - 1].end]; for (const x of ws) t.feed([x]); return t; };
+  check('قل هو with Al-Mulk open... waits (67:23 and 67:24 open with it too)', two(67, words(112, 1, 1).slice(0, 2)).c < 0, {});
+  check('قل هو with Ya-Sin open: Al-Ikhlas after two words', M.sOf[two(36, words(112, 1, 1).slice(0, 2)).c] === 111, { c: two(36, words(112, 1, 1).slice(0, 2)).c });
+  check('an ayah inside the open surah: found after its first two words', two(36, words(36, 79, 79).slice(0, 2)).c === M.pos(36, 79) + 2, { c: two(36, words(36, 79, 79).slice(0, 2)).c - M.pos(36, 79) });
+  check('يا ايها opens many surahs: waits for more', two(36, words(49, 1, 1).slice(0, 2)).c < 0, {});
 }
 
 {
@@ -552,6 +570,18 @@ console.log('Stress: noisy recitation of all of Al-Baqarah');
   check('no false red flags across 6,000+ words', s.wrong + s.missed === 0, s);
   check('nothing left un-tracked', s.pending === 0, s);
 }
+
+
+{
+  // a finished surah, then another surah from its top: there after its first two words
+  const t = new E.Tracker(M); t.strict = true; t.hint = [M.surahs[111].start, M.surahs[111].end];
+  for (const x of [...words(112, 1, 4), ...words(105, 1, 1).slice(0, 3)]) t.feed([x]);
+  check('finished Al-Ikhlas, then الم تر: in Al-Fil by its third word', M.sOf[t.c] === 104 && t.stopped < 0, { s: M.sOf[t.c] + 1, c: t.c });
+  const k = new E.Tracker(M); k.strict = true; k.hint = [M.surahs[111].start, M.surahs[111].end];
+  for (const x of [...words(112, 1, 4), ...words(113, 1, 5)]) k.feed([x]);
+  check('...and simply going on with the next surah is unchanged', k.c === M.surahs[113].start && !k.events.some(e => e.type === 'stop' || e.type === 'relocated'), { c: k.c - M.surahs[113].start });
+}
+
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

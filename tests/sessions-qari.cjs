@@ -20,3 +20,11 @@ Object.assign(module.exports, {
   'open-mulk-in-furqan': { open: 25, rate: 1, script: [{ tap: true }, { pause: 1500 }, '67:1', { pause: 700 }, '67:2', { pause: 4000 }, { tap: true }], expect: r => !r.marks.wrong && !r.marks.missed && !r.marks.check && !r.timeline.some(l => /Stopped/.test(l)) && +r.tally.split('/')[0] >= 15 },
   'open-furqan61-in-mulk': { open: 67, rate: 1, script: [{ tap: true }, { pause: 1500 }, '25:61', { pause: 700 }, '25:62', { pause: 4000 }, { tap: true }], expect: r => !r.marks.wrong && !r.marks.missed && !r.marks.check && !r.timeline.some(l => /Stopped/.test(l)) && +r.tally.split('/')[0] >= 15 },
 });
+// leaving a surah unfinished for another one is a mistake where the reciter left; a finished surah is not
+const went = r => r.timeline.some(l => /You went into Al-Fil/.test(l)) && r.marks.wrong && r.marks.wrong.length === 1;
+Object.assign(module.exports, {
+  'veer-ikhlas-fil': { open: 112, rate: 1, script: [{ tap: true }, { pause: 1500 }, '112:1', { pause: 700 }, '105:1', { pause: 6000 }, { tap: true }], expect: went },
+  'veer-ikhlas-fil-mulk-open': { open: 67, rate: 1, script: [{ tap: true }, { pause: 1500 }, '112:1', { pause: 700 }, '105:1', { pause: 6000 }, { tap: true }], expect: went },
+  'finish-ikhlas-then-fil': { open: 112, rate: 1, script: [{ tap: true }, { pause: 1500 }, '112:1', { pause: 600 }, '112:2', { pause: 600 }, '112:3', { pause: 600 }, '112:4', { pause: 900 }, '105:1', { pause: 600 }, '105:2', { pause: 4000 }, { tap: true }],
+    expect: r => !r.marks.wrong && !r.marks.missed && !r.timeline.some(l => /Stop/.test(l)) && r.timeline.some(l => /Al-Fil 105/.test(l)) },
+});

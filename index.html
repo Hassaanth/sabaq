@@ -64,11 +64,14 @@
   color-scheme: dark;
 }
 
-html { height: 100%; box-sizing: border-box; }
+html { height: 100%; box-sizing: border-box; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 *, *::before, *::after { box-sizing: border-box; }
-body { height: 100%; margin: 0; background: var(--paper); color: var(--ink); font-family: var(--f-ui); font-size: var(--t-md); }
+body { height: 100%; margin: 0; background: var(--paper); color: var(--ink); font-family: var(--f-ui); font-size: var(--t-md); -webkit-tap-highlight-color: transparent; overscroll-behavior: none; }
 button, input, textarea { font: inherit; color: inherit; }
-button { cursor: pointer; }
+/* (touch: no double-tap zoom and no 300 ms wait on a tap; a press is felt at once) */
+button, .w, a { touch-action: manipulation; }
+button { cursor: pointer; -webkit-tap-highlight-color: transparent; transition: transform .12s ease-out, background-color .15s, border-color .15s; }
+button:active { transform: scale(.95); }
 :focus-visible { outline: 2px solid var(--lapis); outline-offset: 2px; border-radius: 6px; }
 
 .app { height: 100%; display: flex; flex-direction: column; }
@@ -85,14 +88,17 @@ button { cursor: pointer; }
 .surah-btn .en { font-size: var(--t-sm); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 9.5rem; }
 .surah-btn svg { flex: none; color: var(--muted); }
 .icon-btn { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 999px; border: 1px solid transparent; background: transparent; color: var(--muted); flex: none; }
-.icon-btn:hover { background: var(--veil); color: var(--ink); }
-.icon-btn[aria-pressed="true"] { background: var(--lapis); color: var(--lapis-ink); }
-@media (max-width: 420px) { .brand span { display: none; } }
+@media (hover: hover) { .icon-btn:hover { background: var(--veil); color: var(--ink); } }
+.icon-btn[aria-pressed="true"], .icon-btn[aria-pressed="true"]:hover { background: var(--lapis); color: var(--lapis-ink); }
+@media (max-width: 420px) { .brand span { display: none; } .top-in { gap: 6px; } .icon-btn { width: 40px; height: 40px; } }
 
 .site-note { background: var(--check-bg); border-bottom: 1px solid var(--rule); }
 .site-in { max-width: 48rem; margin: 0 auto; padding-block: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font-size: var(--t-sm); color: var(--ink); }
 .site-in a { text-decoration: none; }
-.status { max-width: 48rem; margin: 0 auto; padding-block: 8px; font-size: var(--t-sm); color: var(--muted); display: flex; align-items: center; gap: 8px; min-height: 2.25rem; }
+.status { max-width: 48rem; margin: 0 auto; padding-block: 8px; font-size: var(--t-sm); line-height: 1.4; color: var(--muted); display: flex; align-items: center; gap: 10px; min-height: 2.25rem; }
+.status > span:last-child { min-width: 0; }
+/* (on a phone the line keeps room for two rows of text: the page below never shifts as the message changes) */
+@media (max-width: 560px) { .status { min-height: 3.45rem; } }
 .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--pending); flex: none; }
 .status[data-live="on"] .dot { background: var(--ok); animation: pulse 1.4s ease-in-out infinite; }
 .status[data-live="finding"] .dot { background: var(--check); animation: pulse 1s ease-in-out infinite; }
@@ -106,10 +112,19 @@ button { cursor: pointer; }
 main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 30%; }
 .page { max-width: 48rem; margin: 0 auto; padding-block: 20px 48px; }
 .sheet { background: var(--sheet); border: 1px solid var(--rule); border-radius: 14px; padding: 22px clamp(14px, 4vw, 34px) 30px; box-shadow: var(--shadow); }
-.surah-head { text-align: center; display: grid; gap: 4px; padding-bottom: 14px; margin-bottom: 10px; border-bottom: 1px solid var(--rule); }
-.surah-head .ar { font-family: var(--f-quran); font-size: 2.1rem; line-height: 1.6; color: var(--ink); }
-.surah-head .meta { font-size: var(--t-xs); color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+/* the surah's name in a framed band with gilt corners, as at the head of a surah in a mushaf */
+.surah-head { position: relative; text-align: center; display: grid; gap: 2px; padding: 10px 14px 12px; margin-bottom: 12px; border: 1px solid var(--gilt); border: 1px solid color-mix(in srgb, var(--gilt) 55%, transparent); border-radius: 12px; background: var(--cursor-bg); background: linear-gradient(180deg, color-mix(in srgb, var(--cursor-bg) 70%, transparent), transparent); }
+.surah-head::before, .surah-head::after { content: "۞"; position: absolute; top: 50%; transform: translateY(-58%); font-family: var(--f-quran); font-size: 1.15rem; line-height: 1; color: var(--gilt); opacity: .8; }
+.surah-head::before { left: 12px; } .surah-head::after { right: 12px; }
+.surah-head .ar { font-family: var(--f-quran); font-size: 2rem; line-height: 1.6; color: var(--ink); }
+.surah-head .meta { font-size: .6875rem; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; text-wrap: balance; padding-inline: 18px; }
 .bism { font-family: var(--f-quran); text-align: center; font-size: calc(var(--quran-size) * .95); color: var(--muted); margin: 8px 0 4px; }
+@media (max-width: 560px) {
+  /* a phone: the sheet takes nearly the whole width, so each line holds more words and reads more evenly */
+  .page.gutter { padding-left: max(8px, env(safe-area-inset-left, 0px)); padding-right: max(8px, env(safe-area-inset-right, 0px)); padding-block: 4px 40px; }
+  .sheet { padding: 12px 12px 24px; border-radius: 16px; }
+  .quran { line-height: 2.2; }
+}
 .quran { position: relative; direction: rtl; font-family: var(--f-quran); font-size: var(--quran-size); line-height: 2.35; text-align: justify; text-align-last: center; word-spacing: .06em; }
 .quran.big { font-size: calc(var(--quran-size) * 1.12); }
 /* sections of ayahs: one flowing text each; off-screen sections are skipped by the browser until scrolled to */
@@ -118,12 +133,12 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-b
 
 .w { position: relative; z-index: 1; color: var(--pending); border-radius: .28em; padding: 0 .07em; transition: color .25s ease-out, background-color .25s ease-out; cursor: pointer; text-decoration-skip-ink: none; }
 /* the reading light: glides under the word you are on */
-.glide { position: absolute; left: 0; top: 0; z-index: 0; border-radius: .3em; background: var(--cursor-bg); box-shadow: inset 0 -.11em 0 var(--gilt); pointer-events: none; opacity: 0; transition: transform .12s cubic-bezier(.2,.9,.3,1), width .12s cubic-bezier(.2,.9,.3,1), height .12s, opacity .2s; will-change: transform; }
+.glide { position: absolute; left: 0; top: 0; z-index: 0; border-radius: .3em; background: var(--cursor-bg); box-shadow: inset 0 -.11em 0 var(--gilt); pointer-events: none; opacity: 0; transition: transform .16s cubic-bezier(.25,.8,.3,1), width .16s cubic-bezier(.25,.8,.3,1), height .16s, opacity .18s ease-out; will-change: transform, width; }
 /* the word being said fills in from the right at the reciter's pace (karaoke) */
 .glide .fill { position: absolute; top: 0; bottom: .11em; right: 0; width: 0; border-radius: inherit; background: var(--cursor-fill); }
 @media (prefers-reduced-motion: reduce) { .glide { transition: opacity .2s; } .glide .fill { display: none; } }
 .memorize .glide { opacity: 0 !important; }
-.w:hover { background: var(--veil); }
+@media (hover: hover) { .w:hover { background: var(--veil); } }
 .w.s1, .w.s6 { color: var(--ink); }
 /* predicted: heard by a live reading, not yet confirmed (a shade softer; it settles to full ink, or back to grey) */
 .w.s6 { color: var(--ink); color: color-mix(in srgb, var(--ink) 74%, var(--pending)); }
@@ -146,9 +161,10 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-b
 .memorize .w.s0 { color: transparent; background: linear-gradient(var(--veil), var(--veil)) center 58% / calc(100% - .14em) 34% no-repeat; }
 .memorize .w.s0.cur { background: linear-gradient(var(--gilt), var(--gilt)) center 58% / calc(100% - .14em) 34% no-repeat; opacity: .55; box-shadow: none; }
 
-.legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 16px; margin-top: 16px; font-size: var(--t-xs); color: var(--muted); }
-.legend span { display: inline-flex; align-items: center; gap: 6px; }
-.sw { width: 18px; height: 10px; border-radius: 3px; display: inline-block; }
+.legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr)); gap: 8px 16px; margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--rule); font-size: var(--t-xs); color: var(--muted); }
+.legend span { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.legend .tick { width: 18px; text-align: center; flex: none; }
+.sw { width: 18px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
 .sw.k { background: var(--check-bg); border-bottom: 2px dotted var(--check); }
 .sw.u { border-bottom: 2px dotted var(--unclear); }
 .sw.x { background: var(--miss-bg); }
@@ -160,11 +176,19 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-b
 /* ---------- dock ---------- */
 .dock { border-top: 1px solid var(--rule); background: var(--paper); position: relative; }
 .dock-in { max-width: 48rem; margin: 0 auto; padding-block: 10px 12px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; }
-.tally { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: var(--t-xs); color: var(--muted); font-variant-numeric: tabular-nums; min-width: 0; }
+/* how far through the surah: a thin gilt line along the top edge of the dock */
+.prog { position: absolute; left: 0; right: 0; top: -1px; height: 3px; background: var(--rule); overflow: hidden; }
+.prog i { display: block; height: 100%; background: var(--gilt); transform: scaleX(0); transform-origin: right center; transition: transform .4s ease-out; }
+.tally { display: grid; gap: 1px; font-size: var(--t-xs); color: var(--muted); font-variant-numeric: tabular-nums; min-width: 0; }
+.tally span { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
 .tally b { font-weight: 600; font-size: var(--t-sm); color: var(--ink); }
+.tally .t-ok b { font-size: 1.25rem; line-height: 1.2; font-weight: 500; }
+.tally i { width: 7px; height: 7px; border-radius: 50%; flex: none; align-self: center; }
+.tally .t-check i { background: var(--check); } .tally .t-miss i { background: var(--miss); }
 .tally .t-check b { color: var(--check); }
 .tally .t-miss b { color: var(--miss); }
-.mic { width: 64px; height: 64px; border-radius: 50%; border: 0; background: var(--lapis); color: var(--lapis-ink); display: grid; place-items: center; box-shadow: var(--shadow); position: relative; }
+.mic { width: 68px; height: 68px; border-radius: 50%; border: 0; background: var(--lapis); color: var(--lapis-ink); display: grid; place-items: center; box-shadow: 0 1px 2px rgb(0 0 0 / .12), 0 8px 22px color-mix(in srgb, var(--lapis) 38%, transparent); position: relative; }
+.mic:active { transform: scale(.94); }
 .mic::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 2px solid var(--lapis); opacity: 0; }
 .mic[data-state="listening"]::after { animation: ring 1.6s ease-out infinite; }
 /* Sabaq's own model: the ring follows the voice level instead (--lvl, 0..1), solid while a phrase is heard */
@@ -176,8 +200,8 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-padding-b
 .mic[data-state="listening"] .i-stop, .mic[data-state="starting"] .i-stop { display: block; }
 @keyframes ring { 0% { transform: scale(.92); opacity: .7; } 100% { transform: scale(1.25); opacity: 0; } }
 .dock-right { display: flex; justify-content: flex-end; }
-.btn { border: 1px solid var(--rule); background: var(--sheet); border-radius: 999px; padding: 8px 16px; font-size: var(--t-sm); font-weight: 500; }
-.btn:hover { border-color: var(--muted); }
+.btn { border: 1px solid var(--rule); background: var(--sheet); border-radius: 999px; padding: 10px 18px; font-size: var(--t-sm); font-weight: 500; }
+@media (hover: hover) { .btn:hover { border-color: var(--muted); } }
 .btn.primary { background: var(--lapis); color: var(--lapis-ink); border-color: var(--lapis); }
 .toast { position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%); background: var(--ink); color: var(--paper); font-size: var(--t-sm); padding: 8px 14px; border-radius: 999px; box-shadow: var(--shadow); max-width: calc(100vw - 32px); width: max-content; text-align: center; transition: opacity .25s; }
 .toast[data-show="0"] { opacity: 0; pointer-events: none; }
@@ -285,11 +309,12 @@ textarea { width: 100%; min-height: 7.5rem; border: 1px solid var(--rule); backg
 
   <footer class="dock gutter">
     <div class="toast" id="toast" data-show="0" role="status"></div>
+    <div class="prog" aria-hidden="true"><i id="prog"></i></div>
     <div class="dock-in">
       <div class="tally" id="tally">
-        <span><b id="nOk">0</b> recited</span>
-        <span class="t-check"><b id="nCheck">0</b> to check</span>
-        <span class="t-miss"><b id="nMiss">0</b> mistakes</span>
+        <span class="t-ok"><b id="nOk">0</b> recited</span>
+        <span class="t-check"><i></i><b id="nCheck">0</b> to check</span>
+        <span class="t-miss"><i></i><b id="nMiss">0</b> mistakes</span>
       </div>
       <button class="mic" id="micBtn" type="button" data-state="idle" aria-label="Start listening">
         <svg class="i-mic" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>
@@ -353,7 +378,7 @@ textarea { width: 100%; min-height: 7.5rem; border: 1px solid var(--rule); backg
 
 <script src="quran-data.js?v=284227c5"></script>
 <script src="engine.js?v=d4799f05"></script>
-<script src="app.js?v=da7a97c0"></script>
+<script src="app.js?v=d29139d9"></script>
 
 </body>
 </html>

@@ -87,11 +87,12 @@
     const r = sp.getBoundingClientRect(), q = quranEl.getBoundingClientRect();
     const x = r.left - q.left, y = r.top - q.top, w = r.width, h = r.height;
     const jump = !glideAt || Math.abs(glideAt.y - y) > 4;   // a new line: appear there, don't slide across
-    if (jump) glide.style.transition = 'none';
+    // (a new line: it fades in there, a soft change of line instead of a hard cut)
+    if (jump) { glide.style.transition = 'none'; glide.style.opacity = glideAt ? '.25' : '0'; }
     glide.style.transform = 'translate(' + x + 'px,' + y + 'px)';
     glide.style.width = w + 'px'; glide.style.height = h + 'px';
-    glide.style.opacity = '1';
     if (jump) { void glide.offsetWidth; glide.style.transition = ''; }
+    glide.style.opacity = '1';
     glideAt = { y };
   }
   window.addEventListener('resize', () => { glideAt = null; glideSpan = null; render(false); });
@@ -208,7 +209,7 @@
     const su = M.surahs[si];
     shown = si;
     $('surahAr').textContent = 'سُورَةُ ' + su.ar;
-    $('surahMeta').textContent = `${su.n} · ${su.en} · ${su.tr} · ${su.ayahs} ayahs`;
+    $('surahMeta').textContent = `Surah ${su.n} · ${su.tr} · ${su.ayahs} ayahs`;
     $('surahLabel').textContent = su.en;
     $('bism').hidden = su.n === 1 || su.n === 9;
     quranEl.classList.toggle('big', su.end - su.start < 120);
@@ -308,9 +309,12 @@
   function followCursor() {
     if (Date.now() - userScrolledAt < 3500) return;
     const r = curSpan.getBoundingClientRect(), mr = main.getBoundingClientRect();
-    const y = r.top - mr.top;
-    if (y < mr.height * 0.16 || y > mr.height * 0.46) {
-      main.scrollTo({ top: main.scrollTop + y - mr.height * 0.32, behavior: reduceMotion ? 'auto' : 'smooth' });
+    // The line being recited stays a third of the way down: the page moves up one line at a time, as the reciter
+    // reaches each new line (a steady roll, instead of a bigger jump every few lines)
+    const y = r.top - mr.top, want = mr.height * 0.34;
+    if (Math.abs(y - want) > Math.max(24, r.height * 0.6)) {
+      const top = Math.max(0, Math.min(main.scrollHeight - main.clientHeight, main.scrollTop + y - want));
+      if (Math.abs(top - main.scrollTop) > 2) main.scrollTo({ top, behavior: reduceMotion ? 'auto' : 'smooth' });
     }
   }
 
@@ -329,6 +333,13 @@
     $('nOk').textContent = s.ok + s.close + s.unclear;
     $('nCheck').textContent = s.close;
     $('nMiss').textContent = s.wrong + s.missed;
+    // how far through the open surah: the thin line along the top of the dock
+    if (shown >= 0) {
+      const su = M.surahs[shown], st = T.state; let n = 0;
+      for (let p = su.start; p < su.end; p++) if (st[p] !== PENDING) n++;
+      const f = n / Math.max(1, su.end - su.start);
+      if (f !== renderTally.f) { renderTally.f = f; $('prog').style.transform = 'scaleX(' + f.toFixed(4) + ')'; }
+    }
   }
 
   function where(p) { const w = M.where(p); return `${M.surahs[w.surah - 1].en} ${w.surah}:${w.ayah}`; }
@@ -521,6 +532,9 @@
   function attemptInFlight() {
     if (P) return true;
     if (Feed.pending.length) return true;
+    // (words heard and still being weighed: "أن يخلق" said at the stop waits for the word after it, or for the
+    // short silence that ends the phrase. Their verdict is a moment away; the qari must not start over it)
+    if (T.qi < T.q.length) return true;
     if (Input.kind === 'model' && ModelMic.on && (ModelMic.inSpeech || ModelMic.busy || ModelMic.finals.length)) return true;
     // (a phrase's final reading came back and is being judged, or its word check is on the way: the try is not
     // over. Missing this, the qari could start right as a correct try was being accepted)
@@ -579,7 +593,9 @@
     // A word still being weighed when the reciter pauses (e.g. the last word of an ayah) is judged
     // after a short silence, so a slip at the end of an ayah is still caught.
     clearTimeout(idleTimer);
-    if (T.qi < T.q.length) idleTimer = setTimeout(() => { if (!P) { T.flush(); handleEvents(); render(); } }, 1100);
+    // (stopped, and a whole phrase just ended: that was a try at the word, already followed by a pause. It is
+    // judged sooner, so "Correct" comes right after the try)
+    if (T.qi < T.q.length) idleTimer = setTimeout(() => { if (!P) { T.flush(); handleEvents(); render(); } }, wholePhrase && fromModel && T.stopped >= 0 ? 350 : 1100);
   }
   // The highlight sits on the word being said: the word after the last one heard in full. It moves on when the
   // next word is heard starting, never sooner: a word the model already names (it often names a word from its
